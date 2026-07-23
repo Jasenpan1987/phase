@@ -102,4 +102,16 @@ mod tests {
             "must stay false so run()'s setup hook is the only window creator"
         );
     }
+
+    #[test]
+    fn remote_shell_can_fetch_shared_data() {
+        let raw = include_str!("../tauri.conf.json");
+        let config: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let csp = config["app"]["security"]["csp"].as_str().unwrap();
+
+        assert!(
+            csp.contains("connect-src") && csp.contains("https://data.phase-rs.dev"),
+            "remote shell content fetches shared card and image data from R2"
+        );
+    }
 }
