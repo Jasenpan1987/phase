@@ -2,6 +2,8 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import type {
+  AiActionProposal,
+  AiProposalSubmission,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -1158,11 +1160,18 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!aiSeat || aiSeat.type !== "Ai") {
         return;
       }
-      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, actor);
-      if (!action) {
+      const proposal = await this.wasm.getAiActionProposal(aiSeat.data.difficulty, actor);
+      if (!proposal) {
         return;
       }
-      const result = await this.wasm.submitAction(action, actor);
+      const outcome = await this.wasm.submitAiActionProposal(proposal);
+      if (outcome.status === "stale") {
+        continue;
+      }
+      if (outcome.status === "rejected") {
+        throw new AdapterError("P2P_ERROR", `AI proposal rejected: ${outcome.reason}`, false);
+      }
+      const result = outcome.result;
       await this.broadcastStateUpdate(result.events, result.log_entries);
       this.persistAuthoritativeState();
       this.emit({
@@ -1876,8 +1885,31 @@ export class P2PHostAdapter implements EngineAdapter {
     return this.wasm.getSnapshot();
   }
 
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
+  getAiActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> | AiActionProposal | null {
+    return this.nativeBridge
+      ? null
+      : this.wasm.getAiActionProposal(difficulty, playerId);
+  }
+
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    if (!this.ownsAuthority()) {
+      return { status: "stale", reason: "P2P host authority changed" };
+    }
+    if (this.nativeBridge) {
+      return { status: "stale", reason: "native P2P authority owns AI decisions" };
+    }
+    const outcome = await this.wasm.submitAiActionProposal(proposal);
+    if (outcome.status === "applied") {
+      await this.broadcastStateUpdate(outcome.result.events, outcome.result.log_entries);
+      await this.runAiLoop();
+      this.persistAuthoritativeState();
+    }
+    return outcome;
   }
 
   restoreState(_state: PersistedGameState): void {
@@ -2792,10 +2824,6 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.terminated = true;
     void clearP2PSession(this.sessionKey ?? this.hostPeerId);
     this.emit({ type: "terminalResult", result });
-  }
-
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
   }
 
   restoreState(_state: PersistedGameState): void {

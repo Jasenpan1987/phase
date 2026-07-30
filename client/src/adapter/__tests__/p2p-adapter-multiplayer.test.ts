@@ -100,7 +100,11 @@ const mocks = vi.hoisted(() => {
       actions: [],
       autoPassRecommended: false,
     })),
-    getAiAction: vi.fn(async (_difficulty: string, _playerId: number) => null),
+    getAiActionProposal: vi.fn(async (_difficulty: string, _playerId: number) => null),
+    submitAiActionProposal: vi.fn(async () => ({
+      status: "applied",
+      result: { events: [], log_entries: [] },
+    })),
     projectSeatView: vi.fn(async (stateJson: string) => {
       const state = JSON.parse(stateJson) as {
         seats: Array<{ type: string }>;
@@ -164,7 +168,7 @@ interface AsyncMockWithResolvedValueOnce {
   mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
 }
 const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
-const mockGetAiAction = mocks.getAiAction as unknown as AsyncMockWithResolvedValueOnce;
+const mockGetAiActionProposal = mocks.getAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -235,7 +239,8 @@ vi.mock("../wasm-adapter", () => ({
       getLegalActionsForViewer: mocks.getLegalActionsForViewer,
       getFilteredState: mocks.getFilteredState,
       getViewerSnapshot: mocks.getViewerSnapshot,
-      getAiAction: mocks.getAiAction,
+      getAiActionProposal: mocks.getAiActionProposal,
+      submitAiActionProposal: mocks.submitAiActionProposal,
       applySeatMutation: mocks.applySeatMutation,
       projectSeatView: mocks.projectSeatView,
       setMultiplayerMode: mocks.setMultiplayerMode,
@@ -260,7 +265,7 @@ beforeEach(() => {
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
   mockGetState.mockClear();
-  mockGetAiAction.mockClear();
+  mockGetAiActionProposal.mockClear();
 });
 
 afterEach(() => {
@@ -752,18 +757,19 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       .mockResolvedValueOnce({
         waiting_for: { type: "Priority", data: { player: 0 } },
       });
-    mockGetAiAction.mockResolvedValueOnce({
-      type: "MulliganDecision",
-      data: { choice: { type: "Keep" } },
+    mockGetAiActionProposal.mockResolvedValueOnce({
+      token: "proposal-mulligan",
+      semanticOwner: 1,
+      actor: 1,
+      action: { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
     });
 
     await adapter.initializeGame();
 
-    expect(mockGetAiAction).toHaveBeenCalledWith("Medium", 1);
-    expect(mockSubmitAction).toHaveBeenCalledWith(
-      { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
-      1,
-    );
+    expect(mockGetAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(mocks.submitAiActionProposal).toHaveBeenCalledWith(expect.objectContaining({
+      token: "proposal-mulligan",
+    }));
   });
 
   it("keeps the host AI loop silent when the host controls an AI seat's turn", async () => {
@@ -787,7 +793,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     await adapter.initializeGame();
 
-    expect(mockGetAiAction).not.toHaveBeenCalled();
+    expect(mockGetAiActionProposal).not.toHaveBeenCalled();
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
@@ -818,12 +824,19 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         waiting_for: { type: "Priority", data: { player: 0 } },
         priority_player: 0,
       });
-    mockGetAiAction.mockResolvedValueOnce({ type: "PassPriority" });
+    mockGetAiActionProposal.mockResolvedValueOnce({
+      token: "proposal-priority",
+      semanticOwner: 0,
+      actor: 1,
+      action: { type: "PassPriority" },
+    });
 
     await adapter.initializeGame();
 
-    expect(mockGetAiAction).toHaveBeenCalledWith("Medium", 1);
-    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    expect(mockGetAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(mocks.submitAiActionProposal).toHaveBeenCalledWith(expect.objectContaining({
+      token: "proposal-priority",
+    }));
   });
 
   it("issues unique tokens per guest and includes them in per-seat game_setup", async () => {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
-use engine::ai_support::build_decision_context;
+use engine::ai_support::{build_decision_context_for_semantic_owner, AiDecisionContract};
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
 };
@@ -152,6 +152,14 @@ pub fn choose_action_with_session(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> Option<GameAction> {
+    let contract = AiDecisionContract::issue(state, ai_player);
+    let exact_contract_action = |action: GameAction| {
+        contract
+            .candidates
+            .iter()
+            .any(|candidate| candidate.action == action)
+            .then_some(action)
+    };
     // CR 103.5: For simultaneous mulligan states, the AI controller's only
     // job is to act on behalf of `ai_player`. If `ai_player` is not in the
     // pending set, there is nothing to choose — return None so the WASM
@@ -171,7 +179,7 @@ pub fn choose_action_with_session(
     }
 
     if let Some(action) = random_card_predicate_guess(state, ai_player, rng) {
-        return Some(action);
+        return exact_contract_action(action);
     }
 
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
@@ -179,7 +187,7 @@ pub fn choose_action_with_session(
     // policy registry. Punishment value vs counter value.
     if matches!(state.waiting_for, WaitingFor::TributeChoice { .. }) {
         if let Some(decision) = crate::tribute_eval::decide(state) {
-            return Some(GameAction::DecideOptionalEffect {
+            return exact_contract_action(GameAction::DecideOptionalEffect {
                 accept: decision.accept(),
             });
         }
@@ -196,7 +204,7 @@ pub fn choose_action_with_session(
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
         if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
-            return Some(action);
+            return exact_contract_action(action);
         }
     }
 
@@ -211,21 +219,21 @@ pub fn choose_action_with_session(
     if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
         use rand::seq::IndexedRandom;
         if let Some(choice) = options.choose(rng) {
-            return Some(GameAction::ChooseOption {
+            return exact_contract_action(GameAction::ChooseOption {
                 choice: choice.clone(),
             });
         }
     }
 
     if let Some(action) = fast_priority_action(state, ai_player, config, session) {
-        return Some(action);
+        return exact_contract_action(action);
     }
 
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
-        return fallback_action(state, config);
+        return fallback_action(state, config).and_then(exact_contract_action);
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
@@ -238,7 +246,7 @@ pub fn choose_action_with_session(
     if let Some(action) = &chosen {
         emit_decision_trace(state, ai_player, config, action, session);
     }
-    chosen
+    chosen.and_then(exact_contract_action)
 }
 
 fn random_card_predicate_guess(
@@ -584,7 +592,7 @@ fn large_board_main_phase_fast_action_from_actions(
     // the tactical registry so land sequencing and other safety policies still
     // participate. Spell mana value remains the deterministic baseline that
     // this shortcut historically used; policies may adjust or reject it.
-    let decision = build_decision_context(state);
+    let decision = build_decision_context_for_semantic_owner(state, ai_player);
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
     let policies = PolicyRegistry::shared();
 
@@ -656,7 +664,7 @@ fn emit_decision_trace(
         return;
     }
 
-    let ctx = build_decision_context(state);
+    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
     let candidate = ctx.candidates.iter().find(|c| c.action == *action);
     let Some(candidate) = candidate else {
         // The chosen action was produced by a deterministic path (combat AI,
@@ -2038,7 +2046,7 @@ fn score_candidates_core(
         return vec![(action, 1.0)];
     }
 
-    let ctx = build_decision_context(state);
+    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
     #[cfg(test)]
     let policies = session
         .policy_registry_override
@@ -3260,6 +3268,8 @@ pub fn softmax_select_pairs(
 
 #[cfg(test)]
 mod tests {
+    use engine::ai_support::build_decision_context;
+
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::scenario::{GameScenario, P0};

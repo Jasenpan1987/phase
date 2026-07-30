@@ -236,7 +236,7 @@ pub fn apply_for_simulation(
 /// submitting connection; `semantic_owner` is the player whose decision slot
 /// the opaque interaction capability names. They differ when another player
 /// controls that player's decisions.
-pub(crate) fn apply_interaction(
+pub fn apply_interaction(
     state: &mut GameState,
     authenticated_actor: PlayerId,
     semantic_owner: PlayerId,
