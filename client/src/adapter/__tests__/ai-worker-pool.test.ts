@@ -2,24 +2,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AiWorkerPool } from "../ai-worker-pool";
 
-const workers = Array.from({ length: 2 }, () => ({
-  initialize: vi.fn().mockResolvedValue(undefined),
-  loadCardDb: vi.fn().mockResolvedValue(1),
-  loadCardDbFromUrl: vi.fn().mockResolvedValue(1),
-  restoreState: vi.fn().mockResolvedValue(undefined),
-  getAiScoredCandidates: vi.fn(),
-  dispose: vi.fn(),
+const workerHarness = vi.hoisted(() => ({
+  workers: Array.from({ length: 2 }, () => ({
+    initialize: vi.fn().mockResolvedValue(undefined),
+    loadCardDb: vi.fn().mockResolvedValue(1),
+    loadCardDbFromUrl: vi.fn().mockResolvedValue(1),
+    restoreState: vi.fn().mockResolvedValue(undefined),
+    getAiScoredCandidates: vi.fn(),
+    dispose: vi.fn(),
+  })),
+  nextWorker: 0,
 }));
-let nextWorker = 0;
+const { workers } = workerHarness;
 
 vi.mock("../engine-worker-client", () => ({
-  EngineWorkerClient: vi.fn().mockImplementation(() => workers[nextWorker++]),
+  EngineWorkerClient: class {
+    constructor() {
+      return workerHarness.workers[workerHarness.nextWorker++];
+    }
+  },
 }));
 
 describe("AiWorkerPool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    nextWorker = 0;
+    workerHarness.nextWorker = 0;
   });
 
   it("merges score-only candidates without minting or dispatching an action", async () => {

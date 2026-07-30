@@ -10,15 +10,18 @@ import {
 } from "../../../adapter/types";
 import { buildGameState } from "../../../test/factories/gameStateFactory";
 
-const dispatchAiActionProposal = vi.fn<
-  (proposal: AiActionProposal) => Promise<{ status: "applied" | "stale" }>
->();
+const dispatchMocks = vi.hoisted(() => ({
+  dispatchAiActionProposal: vi.fn<
+    (proposal: AiActionProposal) => Promise<{ status: "applied" | "stale" }>
+  >(),
+}));
+const { dispatchAiActionProposal } = dispatchMocks;
 const notifyEngineLost = vi.fn();
 const attemptStateRehydrate = vi.fn(async () => false);
 const isEnginePanic = vi.fn<(error: unknown) => boolean>(() => false);
 const routePanic = vi.fn<(reason: string, panic?: string) => Promise<void>>(async () => {});
 
-vi.mock("../../dispatch", () => ({ dispatchAiActionProposal }));
+vi.mock("../../dispatch", () => ({ dispatchAiActionProposal: dispatchMocks.dispatchAiActionProposal }));
 vi.mock("../../engineRecovery", () => ({
   attemptStateRehydrate: () => attemptStateRehydrate(),
   isEnginePanic: (error: unknown) => isEnginePanic(error),
