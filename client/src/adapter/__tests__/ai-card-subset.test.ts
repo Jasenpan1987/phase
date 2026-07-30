@@ -122,12 +122,12 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
     await adapter.initialize();
     await adapter.warmCardDatabase();
     await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(PASS_PROPOSAL);
-    const gameA = mockWorkerClient.loadCardDb.mock.calls.at(-1)?.[0] as string;
+    const gameA = mockWorkerClient.loadCardDb.mock.calls[mockWorkerClient.loadCardDb.mock.calls.length - 1]?.[0] as string;
     expect(gameA).toContain("Game A Card");
 
     await adapter.resetGameState();
     await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(PASS_PROPOSAL);
-    const gameB = mockWorkerClient.loadCardDb.mock.calls.at(-1)?.[0] as string;
+    const gameB = mockWorkerClient.loadCardDb.mock.calls[mockWorkerClient.loadCardDb.mock.calls.length - 1]?.[0] as string;
     expect(gameB).toContain("Game B Card");
     expect(gameB).not.toContain("Game A Card");
   });
@@ -245,7 +245,7 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
 
     const loaded = mockWorkerClient.loadCardDb.mock.calls.map(([text]) => text as string);
     expect(loaded.some((text) => text.includes("Stale Game Card"))).toBe(false);
-    expect(loaded.at(-1)).toContain("Current Game Card");
+    expect(loaded[loaded.length - 1]).toContain("Current Game Card");
   });
 
   it("drops the pool for an unbounded game and restores it for the next bounded game", async () => {
@@ -270,7 +270,7 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
     await adapter.resetGameState();
     await adapter.getAiActionProposal("VeryHard", 0);
     expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(2);
-    const bounded = mockWorkerClient.loadCardDb.mock.calls.at(-1)?.[0] as string;
+    const bounded = mockWorkerClient.loadCardDb.mock.calls[mockWorkerClient.loadCardDb.mock.calls.length - 1]?.[0] as string;
     expect(bounded).toContain("Bounded Card");
   });
 });

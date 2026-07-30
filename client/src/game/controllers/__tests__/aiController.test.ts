@@ -15,8 +15,8 @@ const dispatchAiActionProposal = vi.fn<
 >();
 const notifyEngineLost = vi.fn();
 const attemptStateRehydrate = vi.fn(async () => false);
-const isEnginePanic = vi.fn(() => false);
-const routePanic = vi.fn(async () => {});
+const isEnginePanic = vi.fn<(error: unknown) => boolean>(() => false);
+const routePanic = vi.fn<(reason: string, panic?: string) => Promise<void>>(async () => {});
 
 vi.mock("../../dispatch", () => ({ dispatchAiActionProposal }));
 vi.mock("../../engineRecovery", () => ({
