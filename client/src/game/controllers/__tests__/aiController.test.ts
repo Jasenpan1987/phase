@@ -135,7 +135,7 @@ describe("AI proposal controller", () => {
     await runOnce();
     await runOnce();
 
-    expect(getAiActionProposal).toHaveBeenCalledTimes(2);
+    expect(getAiActionProposal).toHaveBeenCalledTimes(3);
     expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
     expect(notifyEngineLost).not.toHaveBeenCalled();
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
@@ -197,7 +197,7 @@ describe("AI proposal controller", () => {
     await runOnce();
 
     expect(attemptStateRehydrate).toHaveBeenCalledOnce();
-    expect(getAiActionProposal).toHaveBeenCalledTimes(2);
+    expect(getAiActionProposal).toHaveBeenCalledTimes(3);
     expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
     expect(notifyEngineLost).not.toHaveBeenCalled();
     controller.dispose();
@@ -238,7 +238,7 @@ describe("AI proposal controller", () => {
     storeSubscriber?.();
     await runOnce();
 
-    expect(getAiActionProposal).toHaveBeenCalledOnce();
+    expect(getAiActionProposal).toHaveBeenCalledTimes(2);
     expect(dispatchAiActionProposal).toHaveBeenCalledOnce();
     controller.dispose();
   });
