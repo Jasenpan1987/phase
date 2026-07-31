@@ -90,6 +90,24 @@ fn candidate_action_matches(issued: &GameAction, submitted: &GameAction) -> bool
             GameAction::ChooseKeptPermanents { kept: issued },
             GameAction::ChooseKeptPermanents { kept: submitted },
         ) => same_unordered_objects(issued, submitted),
+        (
+            GameAction::DeclareAttackers {
+                attacks: issued,
+                bands: issued_bands,
+            },
+            GameAction::DeclareAttackers {
+                attacks: submitted,
+                bands: submitted_bands,
+            },
+        ) => same_unordered(issued, submitted) && issued_bands == submitted_bands,
+        (
+            GameAction::DeclareBlockers {
+                assignments: issued,
+            },
+            GameAction::DeclareBlockers {
+                assignments: submitted,
+            },
+        ) => same_unordered(issued, submitted),
         _ => issued == submitted,
     }
 }
@@ -98,6 +116,10 @@ fn same_unordered_objects(
     issued: &[crate::types::identifiers::ObjectId],
     submitted: &[crate::types::identifiers::ObjectId],
 ) -> bool {
+    same_unordered(issued, submitted)
+}
+
+fn same_unordered<T: Clone + Ord>(issued: &[T], submitted: &[T]) -> bool {
     let mut issued = issued.to_vec();
     let mut submitted = submitted.to_vec();
     issued.sort_unstable();
