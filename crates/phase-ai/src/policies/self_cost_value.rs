@@ -112,7 +112,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
             .cloned()
             .unwrap_or_default();
 
-        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, &ability) {
+        if synergy_justifies_self_cost(&features, &ability) {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
@@ -962,6 +962,12 @@ mod tests {
             &[CoreType::Creature],
             activated(gain_life(1), sac_creature_cost()),
         );
+        let source_object = state
+            .objects
+            .get_mut(&source)
+            .expect("Spark Reaper source exists");
+        source_object.power = Some(1);
+        source_object.toughness = Some(1);
         let features = features_with(
             0.0,
             0.0,
@@ -977,7 +983,6 @@ mod tests {
 
     #[test]
     fn cedh_aristocrats_never_waives_a_sacrifice_leaf_direct_or_nested() {
-        let state = GameState::new_two_player(42);
         let features = features_with(
             0.0,
             1.0,
@@ -1003,7 +1008,7 @@ mod tests {
         for cost in costs {
             let ability = activated(gain_life(1), cost);
             assert!(
-                !synergy_justifies_self_cost(&features, &state, AI, &ability),
+                !synergy_justifies_self_cost(&features, &ability),
                 "a sacrifice leaf must remain priced even in a CEDH aristocrats deck"
             );
         }

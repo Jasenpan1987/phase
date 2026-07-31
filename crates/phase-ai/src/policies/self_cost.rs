@@ -770,12 +770,10 @@ fn pay_life_criticality_mult(state: &GameState, ai_player: PlayerId) -> f64 {
 /// lifegain/reanimator engine fed by the resource spent.
 pub(crate) fn synergy_justifies_self_cost(
     features: &DeckFeatures,
-    state: &GameState,
-    ai_player: PlayerId,
     ability: &AbilityDefinition,
 ) -> bool {
     ability.cost.as_ref().is_some_and(|cost| {
-        !contains_sacrifice_cost(cost) && synergy_justifies_cost(features, state, ai_player, cost)
+        !contains_sacrifice_cost(cost) && synergy_justifies_cost(features, cost)
     })
 }
 
@@ -792,12 +790,7 @@ fn contains_sacrifice_cost(cost: &AbilityCost) -> bool {
     }
 }
 
-fn synergy_justifies_cost(
-    features: &DeckFeatures,
-    state: &GameState,
-    ai_player: PlayerId,
-    cost: &AbilityCost,
-) -> bool {
+fn synergy_justifies_cost(features: &DeckFeatures, cost: &AbilityCost) -> bool {
     match cost {
         // Sacrificing the source is a concrete cost, not a generic aristocrats
         // discount.  Death triggers remain part of an ability's actual payoff
@@ -811,7 +804,7 @@ fn synergy_justifies_cost(
         AbilityCost::Exile { .. } => false,
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
-            .any(|c| synergy_justifies_cost(features, state, ai_player, c)),
+            .any(|cost| synergy_justifies_cost(features, cost)),
         _ => false,
     }
 }

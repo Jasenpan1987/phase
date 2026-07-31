@@ -515,7 +515,7 @@ mod tests {
         assert_eq!(calls.get(), 2);
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
-        assert!(state.phase_stops.get(&PlayerId(1)).is_none());
+        assert!(!state.phase_stops.contains_key(&PlayerId(1)));
     }
 
     #[test]
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
-        assert!(state.phase_stops.get(&PlayerId(1)).is_none());
+        assert!(!state.phase_stops.contains_key(&PlayerId(1)));
     }
 
     #[test]

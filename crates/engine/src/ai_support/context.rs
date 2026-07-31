@@ -4,8 +4,7 @@ use crate::game::turn_control;
 use crate::types::actions::GameAction;
 use crate::types::player::PlayerId;
 
-use super::candidates::CandidateAction;
-use super::validated_candidate_actions_for_semantic_owner;
+use super::candidates::{candidate_actions_for_semantic_owner_with_probe, CandidateAction};
 
 #[derive(Debug, Clone)]
 pub struct AiDecisionContext {
@@ -34,7 +33,19 @@ impl AiDecisionContract {
             semantic_owner,
             authorized_actor: turn_control::authorized_submitter_for_player(state, semantic_owner),
             state_revision: state.state_revision,
-            candidates: validated_candidate_actions_for_semantic_owner(state, semantic_owner),
+            // The engine's candidate enumerator is the authoritative finite
+            // domain for this prompt. Some bounded continuation forms (combat,
+            // search, and multi-step selections) are intentionally completed
+            // by their dedicated reducer paths, so a generic clone-and-apply
+            // probe is not a sound way to remove them from the contract.
+            // Submission still performs the public action-boundary apply after
+            // exact-membership and owner checks.
+            candidates: {
+                let mut candidates =
+                    candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None);
+                candidates.sort_by(|left, right| left.action.cmp_stable(&right.action));
+                candidates
+            },
         }
     }
 
@@ -58,9 +69,9 @@ impl AiDecisionContract {
 }
 
 pub fn build_decision_context(state: &GameState) -> AiDecisionContext {
-    // The tactical layer must receive the same finite, simulated-legal domain
-    // as the action boundary.  Returning raw enumeration here is how a policy
-    // could select an action whose arguments were never dispatchable.
+    // The tactical layer must receive the same finite, engine-issued domain as
+    // the action boundary. Returning a reconstructed action here is how a
+    // policy could select arguments outside the prompt's bounds.
     let semantic_owner = state
         .waiting_for
         .acting_player()
