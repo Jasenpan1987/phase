@@ -203,6 +203,22 @@ pub fn choose_action_with_session(
         }
     }
 
+    // CR 103.5 + TL:R 906.6: simultaneous opening-hand bottoming is resolved
+    // for one semantic owner at a time. Generic candidate validation applies
+    // actions as the first pending seat, so it cannot validate a later seat's
+    // independently sized selection. The deterministic branch uses that
+    // owner's bounded hand directly; the issued contract still verifies the
+    // selected card set before it can leave the AI.
+    if matches!(
+        state.waiting_for,
+        WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. }
+    ) {
+        let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
+        if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
+            return exact_contract_action(action);
+        }
+    }
+
     // CR 608.2d (hidden information): the guesser has no legal access to the
     // committed value / chosen-card identity — it is genuinely a guess. The AI
     // MUST NOT score guess branches via `score_candidates` (eval/search runs on
