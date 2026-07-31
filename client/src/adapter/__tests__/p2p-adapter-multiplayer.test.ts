@@ -166,9 +166,11 @@ const mockProjectSeatView = mocks.projectSeatView;
 interface AsyncMockWithResolvedValueOnce {
   mockClear: () => void;
   mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
+  mockResolvedValue: (value: unknown) => AsyncMockWithResolvedValueOnce;
 }
 const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetAiActionProposal = mocks.getAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
+const mockSubmitAiActionProposal = mocks.submitAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -266,7 +268,7 @@ beforeEach(() => {
   mockProjectSeatView.mockClear();
   mockGetState.mockClear();
   mockGetAiActionProposal.mockClear();
-  mocks.submitAiActionProposal.mockClear();
+  mockSubmitAiActionProposal.mockClear();
 });
 
 afterEach(() => {
@@ -797,7 +799,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       actor: 1,
       action: { type: "PassPriority" },
     });
-    mocks.submitAiActionProposal.mockResolvedValue({
+    mockSubmitAiActionProposal.mockResolvedValue({
       status: "stale",
       reason: "decision_changed_or_action_outside_issued_bounds",
     });
