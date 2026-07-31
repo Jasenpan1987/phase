@@ -63,7 +63,7 @@ interface PendingLocalAction {
   /** WaitingFor object that prompted this local action. */
   waitingFor: WaitingFor | null;
   proposal?: AiActionProposal;
-  proposalStale?: () => void;
+  proposalOutcome?: (outcome: "applied" | "stale") => void;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -286,7 +286,7 @@ async function processAction(
   generation: number,
   session: BoundGameSession | null,
   proposal?: AiActionProposal,
-  proposalStale?: () => void,
+  proposalOutcome?: (outcome: "applied" | "stale") => void,
 ): Promise<void> {
   if (!isDispatchContextCurrent(generation, session)) return;
   const { adapter, gameState } = useGameStore.getState();
@@ -337,9 +337,10 @@ async function processAction(
     // A stale AI capability is a benign race: its action was never applied.
     // The controller observes the unchanged prompt and asks the engine again.
     if (result === null) {
-      proposalStale?.();
+      proposalOutcome?.("stale");
       return;
     }
+    proposalOutcome?.("applied");
   } catch (err) {
     if (!isDispatchContextCurrent(generation, session)) return;
     // Stale click after a priority/turn shift: the engine's actor-auth guard
@@ -384,9 +385,10 @@ async function processAction(
     try {
       result = await submit();
       if (result === null) {
-        proposalStale?.();
+        proposalOutcome?.("stale");
         return;
       }
+      proposalOutcome?.("applied");
     } catch (retryErr) {
       if (!isDispatchContextCurrent(generation, session)) return;
       // Prefer the captured panic message over the bare retry tag — that's
@@ -593,7 +595,7 @@ async function processQueue(generation: number): Promise<void> {
             generation,
             next.session,
             next.proposal,
-            next.proposalStale,
+            next.proposalOutcome,
           );
         } finally {
           if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
@@ -663,7 +665,7 @@ async function dispatchActionInternal(
   actor: number,
   session: BoundGameSession | null,
   proposal?: AiActionProposal,
-  proposalStale?: () => void,
+  proposalOutcome?: (outcome: "applied" | "stale") => void,
 ): Promise<void> {
   if (!isBoundGameSessionCurrent(session)) return;
   const { gameMode } = useGameStore.getState();
@@ -708,7 +710,7 @@ async function dispatchActionInternal(
         session,
         waitingFor: currentWaitingFor,
         proposal,
-        proposalStale,
+        proposalOutcome,
         resolve,
         reject,
       });
@@ -724,7 +726,7 @@ async function dispatchActionInternal(
     waitingFor: currentWaitingFor,
   };
   try {
-    await processAction(submittedAction, actor, generation, session, proposal, proposalStale);
+    await processAction(submittedAction, actor, generation, session, proposal, proposalOutcome);
   } catch (e) {
     if (!isDispatchContextCurrent(generation, session)) return;
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
@@ -747,11 +749,11 @@ export function dispatchAction(
 export async function dispatchAiActionProposal(
   proposal: AiActionProposal,
 ): Promise<{ status: "applied" | "stale" }> {
-  let stale = false;
-  await dispatchActionInternal(proposal.action, proposal.actor, null, proposal, () => {
-    stale = true;
+  let outcome: "applied" | "stale" = "stale";
+  await dispatchActionInternal(proposal.action, proposal.actor, null, proposal, (submitted) => {
+    outcome = submitted;
   });
-  return { status: stale ? "stale" : "applied" };
+  return { status: outcome };
 }
 
 /**

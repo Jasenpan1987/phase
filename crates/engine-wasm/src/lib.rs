@@ -178,6 +178,10 @@ impl AiProposalRegistry {
 
     fn insert(&mut self, contract: AiDecisionContract) -> String {
         self.serial = self.serial.wrapping_add(1);
+        // A newer proposal supersedes every earlier token in this authority
+        // generation. Retaining old candidate domains would let stale retries
+        // grow this long-lived worker registry without bound.
+        self.proposals.clear();
         let token = format!(
             "ai-{}-{}-{:016x}",
             self.generation,
@@ -237,6 +241,9 @@ mod ai_proposal_registry_tests {
         let second = registry.insert(contract());
 
         assert_ne!(first, second);
+        assert!(registry.proposal(&first).is_none());
+        assert!(registry.proposal(&second).is_some());
+        assert_eq!(registry.proposals.len(), 1);
         assert!(registry.proposal("forged-token").is_none());
     }
 }

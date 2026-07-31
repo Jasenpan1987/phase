@@ -266,6 +266,7 @@ beforeEach(() => {
   mockProjectSeatView.mockClear();
   mockGetState.mockClear();
   mockGetAiActionProposal.mockClear();
+  mocks.submitAiActionProposal.mockClear();
 });
 
 afterEach(() => {
@@ -772,6 +773,41 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     }));
   });
 
+  it("bounds repeated stale AI proposals", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+
+    mockGetState.mockResolvedValue({
+      waiting_for: { type: "Priority", data: { player: 1 } },
+      priority_player: 1,
+    });
+    mockGetAiActionProposal.mockResolvedValue({
+      token: "proposal-stale",
+      semanticOwner: 1,
+      actor: 1,
+      action: { type: "PassPriority" },
+    });
+    mocks.submitAiActionProposal.mockResolvedValue({
+      status: "stale",
+      reason: "decision_changed_or_action_outside_issued_bounds",
+    });
+
+    await expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_ERROR",
+    });
+    expect(mocks.submitAiActionProposal).toHaveBeenCalledTimes(4);
+  });
+
   it("keeps the host AI loop silent when the host controls an AI seat's turn", async () => {
     const { adapter } = makeHost(2);
     await adapter.initialize();
@@ -1221,6 +1257,32 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow(
       /paused-disconnect/,
     );
+  });
+
+  it("blocks AI proposal submission while paused-disconnect", async () => {
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const g1 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    g1.simulateClose();
+
+    await expect(adapter.submitAiActionProposal({
+      token: "proposal-paused",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    })).rejects.toMatchObject({
+      code: "P2P_PAUSED",
+    });
+    expect(mocks.submitAiActionProposal).not.toHaveBeenCalled();
   });
 
   // Regression guard: the wire must carry legalActionsByObject, spellCosts,

@@ -51,7 +51,9 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
-use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::GameState;
@@ -781,13 +783,8 @@ pub(crate) fn synergy_justifies_self_cost(
 /// choice of costs.  Treating a sibling lifegain/reanimator cost as a reason to
 /// waive the whole tree would reintroduce the aristocrats exception indirectly.
 fn contains_sacrifice_cost(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Sacrifice(_) => true,
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
-            costs.iter().any(contains_sacrifice_cost)
-        }
-        _ => false,
-    }
+    cost.categories()
+        .contains(&CostCategory::SacrificesPermanent)
 }
 
 fn synergy_justifies_cost(features: &DeckFeatures, cost: &AbilityCost) -> bool {

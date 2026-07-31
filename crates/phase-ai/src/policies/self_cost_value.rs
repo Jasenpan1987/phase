@@ -1003,6 +1003,18 @@ mod tests {
                     },
                 ],
             },
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PerCounter {
+                        counter: CounterType::Age,
+                        target: TargetFilter::SelfRef,
+                        base: Box::new(sac_creature_cost()),
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            },
         ];
 
         for cost in costs {
