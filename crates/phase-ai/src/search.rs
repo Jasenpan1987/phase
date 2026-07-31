@@ -154,7 +154,7 @@ pub fn choose_action_with_session(
 ) -> Option<GameAction> {
     let contract = AiDecisionContract::issue(state, ai_player);
     let exact_contract_action =
-        |action: GameAction| contract.contains_action(&action).then_some(action);
+        |action: GameAction| contract.contains_action(state, &action).then_some(action);
     // CR 103.5: For simultaneous mulligan states, the AI controller's only
     // job is to act on behalf of `ai_player`. If `ai_player` is not in the
     // pending set, there is nothing to choose — return None so the WASM

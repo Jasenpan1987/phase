@@ -12,13 +12,14 @@ pub struct AiDecisionContext {
     pub candidates: Vec<CandidateAction>,
 }
 
-/// The finite action domain issued by the engine for one AI decision.
+/// The action bounds issued by the engine for one AI decision.
 ///
 /// `WaitingFor` carries the typed bounds for individual choice fields; this
-/// contract is the corresponding complete bound for compound actions.  A
-/// consumer must submit one of these exact actions, for the semantic owner and
-/// authorized actor recorded here, rather than reconstructing an action from
-/// partial UI state.
+/// contract is the corresponding complete bound for compound actions. Discrete
+/// choices are issued as candidates, while combinatorial combat declarations
+/// are bounded by the authoritative combat validators. A consumer must submit
+/// an in-bound action for the semantic owner and authorized actor recorded here,
+/// rather than reconstructing an action from partial UI state.
 #[derive(Debug, Clone)]
 pub struct AiDecisionContract {
     pub semantic_owner: PlayerId,
@@ -61,7 +62,7 @@ impl AiDecisionContract {
                 .contains(&self.semantic_owner)
             && self.authorized_actor == actor
             && turn_control::authorized_submitter_for_player(state, self.semantic_owner) == actor
-            && self.contains_action(action)
+            && self.contains_action(state, action)
     }
 
     /// Whether an action is in this contract's finite domain.
@@ -69,10 +70,30 @@ impl AiDecisionContract {
     /// `SelectCards` is a selection, not an ordering instruction; the engine
     /// exposes separate actions for ordered choices. Preserve its issued card
     /// set and exact cardinality while accepting any presentation order.
-    pub fn contains_action(&self, action: &GameAction) -> bool {
-        self.candidates
-            .iter()
-            .any(|candidate| candidate_action_matches(&candidate.action, action))
+    ///
+    /// Combat declaration vectors have a combinatorial legal domain, so their
+    /// bounds are checked by the engine's single combat validator rather than
+    /// by the heuristic candidate sample.
+    pub fn contains_action(&self, state: &GameState, action: &GameAction) -> bool {
+        match (&state.waiting_for, action) {
+            (
+                WaitingFor::DeclareAttackers { player, .. },
+                GameAction::DeclareAttackers { attacks, bands },
+            ) if *player == self.semantic_owner => {
+                crate::game::combat::validate_attack_declaration(state, attacks, bands).is_ok()
+            }
+            (
+                WaitingFor::DeclareBlockers { player, .. },
+                GameAction::DeclareBlockers { assignments },
+            ) if *player == self.semantic_owner => {
+                crate::game::combat::validate_blockers_for_player(state, *player, assignments)
+                    .is_ok()
+            }
+            _ => self
+                .candidates
+                .iter()
+                .any(|candidate| candidate_action_matches(&candidate.action, action)),
+        }
     }
 }
 

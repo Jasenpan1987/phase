@@ -1976,10 +1976,10 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
             return Ok(JsValue::NULL);
         };
 
-        // This is deliberately exact equality, rather than a second set of
-        // per-action argument checks. The issued candidates already encode all
-        // WaitingFor bounds (including X, targets, payments and selections).
-        if !contract.contains_action(&action) {
+        // This checks the engine-issued action bounds rather than reconstructing
+        // an action schema in WASM. Discrete candidates and combinatorial combat
+        // declarations both remain validated against the current WaitingFor state.
+        if !contract.contains_action(state, &action) {
             return Ok(JsValue::NULL);
         }
         let actor = contract.authorized_actor;
@@ -2051,7 +2051,7 @@ pub fn get_ai_action_proposal_from_scores(
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
             .into_iter()
-            .filter(|(action, _)| contract.contains_action(action))
+            .filter(|(action, _)| contract.contains_action(state, action))
             .collect();
         let config =
             create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
@@ -2470,7 +2470,7 @@ mod tests {
     }
 
     /// Registers a production-issued contract only after proving `action` is
-    /// an exact member of its finite domain. This mirrors the public proposal
+    /// within its engine-issued bounds. This mirrors the public proposal
     /// endpoint's issuance path without hand-authoring candidate metadata.
     fn install_issued_candidate(
         state: GameState,
@@ -2479,7 +2479,8 @@ mod tests {
     ) -> String {
         let contract = issue_contract(state, semantic_owner);
         assert!(
-            contract.contains_action(action),
+            with_state(|state| contract.contains_action(state, action))
+                .expect("test state must remain installed"),
             "action must come from the engine-issued domain: {action:?}"
         );
         AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract))
