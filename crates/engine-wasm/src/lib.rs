@@ -252,7 +252,7 @@ mod ai_proposal_registry_tests {
 #[serde(rename_all = "camelCase", tag = "status")]
 enum AiProposalSubmission {
     Applied {
-        result: engine::types::game_state::ActionResult,
+        result: Box<engine::types::game_state::ActionResult>,
     },
     Stale {
         reason: &'static str,
@@ -2119,7 +2119,9 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
             Ok(result) => {
                 record_replay_action(false, actor, action);
                 invalidate_ai_proposals();
-                AiProposalSubmission::Applied { result }
+                AiProposalSubmission::Applied {
+                    result: Box::new(result),
+                }
             }
             Err(error) => AiProposalSubmission::Rejected {
                 reason: error.to_string(),
