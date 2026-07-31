@@ -61,10 +61,34 @@ impl AiDecisionContract {
                 .contains(&self.semantic_owner)
             && self.authorized_actor == actor
             && turn_control::authorized_submitter_for_player(state, self.semantic_owner) == actor
-            && self
-                .candidates
-                .iter()
-                .any(|candidate| candidate.action == *action)
+            && self.contains_action(action)
+    }
+
+    /// Whether an action is in this contract's finite domain.
+    ///
+    /// `SelectCards` is a selection, not an ordering instruction; the engine
+    /// exposes separate actions for ordered choices. Preserve its issued card
+    /// set and exact cardinality while accepting any presentation order.
+    pub fn contains_action(&self, action: &GameAction) -> bool {
+        self.candidates
+            .iter()
+            .any(|candidate| candidate_action_matches(&candidate.action, action))
+    }
+}
+
+fn candidate_action_matches(issued: &GameAction, submitted: &GameAction) -> bool {
+    match (issued, submitted) {
+        (
+            GameAction::SelectCards { cards: issued },
+            GameAction::SelectCards { cards: submitted },
+        ) => {
+            let mut issued = issued.clone();
+            let mut submitted = submitted.clone();
+            issued.sort_unstable();
+            submitted.sort_unstable();
+            issued == submitted
+        }
+        _ => issued == submitted,
     }
 }
 
@@ -200,6 +224,39 @@ mod tests {
             &GameAction::PlayLand {
                 object_id: ObjectId(999),
                 card_id: CardId(1),
+            },
+        ));
+    }
+
+    #[test]
+    fn decision_contract_accepts_an_issued_card_selection_in_any_order() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "First".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Second".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: vec![crate::types::game_state::MulliganBottomEntry { player, count: 2 }],
+            reason: crate::types::game_state::OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+
+        let contract = AiDecisionContract::issue(&state, player);
+        assert!(contract.permits(
+            &state,
+            player,
+            &GameAction::SelectCards {
+                cards: vec![second, first],
             },
         ));
     }

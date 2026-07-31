@@ -1979,11 +1979,7 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         // This is deliberately exact equality, rather than a second set of
         // per-action argument checks. The issued candidates already encode all
         // WaitingFor bounds (including X, targets, payments and selections).
-        if !contract
-            .candidates
-            .iter()
-            .any(|candidate| candidate.action == action)
-        {
+        if !contract.contains_action(&action) {
             return Ok(JsValue::NULL);
         }
         let actor = contract.authorized_actor;
@@ -2055,12 +2051,7 @@ pub fn get_ai_action_proposal_from_scores(
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
             .into_iter()
-            .filter(|(action, _)| {
-                contract
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.action == *action)
-            })
+            .filter(|(action, _)| contract.contains_action(action))
             .collect();
         let config =
             create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
@@ -2488,10 +2479,7 @@ mod tests {
     ) -> String {
         let contract = issue_contract(state, semantic_owner);
         assert!(
-            contract
-                .candidates
-                .iter()
-                .any(|candidate| candidate.action == *action),
+            contract.contains_action(action),
             "action must come from the engine-issued domain: {action:?}"
         );
         AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract))
