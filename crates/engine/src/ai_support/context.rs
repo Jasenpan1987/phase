@@ -81,15 +81,28 @@ fn candidate_action_matches(issued: &GameAction, submitted: &GameAction) -> bool
         (
             GameAction::SelectCards { cards: issued },
             GameAction::SelectCards { cards: submitted },
-        ) => {
-            let mut issued = issued.clone();
-            let mut submitted = submitted.clone();
-            issued.sort_unstable();
-            submitted.sort_unstable();
-            issued == submitted
-        }
+        ) => same_unordered_objects(issued, submitted),
+        (
+            GameAction::ChooseKeptCreatures { kept: issued },
+            GameAction::ChooseKeptCreatures { kept: submitted },
+        )
+        | (
+            GameAction::ChooseKeptPermanents { kept: issued },
+            GameAction::ChooseKeptPermanents { kept: submitted },
+        ) => same_unordered_objects(issued, submitted),
         _ => issued == submitted,
     }
+}
+
+fn same_unordered_objects(
+    issued: &[crate::types::identifiers::ObjectId],
+    submitted: &[crate::types::identifiers::ObjectId],
+) -> bool {
+    let mut issued = issued.to_vec();
+    let mut submitted = submitted.to_vec();
+    issued.sort_unstable();
+    submitted.sort_unstable();
+    issued == submitted
 }
 
 pub fn build_decision_context(state: &GameState) -> AiDecisionContext {
