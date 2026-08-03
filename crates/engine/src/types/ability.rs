@@ -3070,6 +3070,19 @@ pub enum RestrictionPlayerScope {
     /// as `TargetedPlayer`/`DefendingPlayer`. Mirrors the existing
     /// `ControllerRef::ScopedPlayer` / `TargetFilter::ScopedPlayer` siblings.
     ScopedPlayer,
+    /// CR 109.5 + CR 611.2a + CR 611.2c: The affected "you" — the "you" in "you
+    /// can't cast additional spells this turn" (Conduit of Worlds). Because that
+    /// rider is created by the resolution of an activated ability, "you" is the
+    /// player who activated it (CR 109.5), and the resulting rules-modifying
+    /// continuous effect exists independently of its source (CR 611.2c), lasting
+    /// until end of turn (CR 611.2a). `add_restriction::fill_runtime_fields`
+    /// therefore lowers this scope to `SpecificPlayer(original_controller)` at
+    /// creation — locking the activator so the ban survives the source changing
+    /// controller or leaving play — exactly like the other affected-player scopes
+    /// (`TargetedPlayer`, `DefendingPlayer`, `ScopedPlayer`,
+    /// `ParentObjectTargetController`). This parser-facing scope is never stored:
+    /// enforcement and display only ever see the lowered `SpecificPlayer`.
+    SourceController,
 }
 
 // ---------------------------------------------------------------------------
@@ -23871,6 +23884,29 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_optional_effect_performed_recursive(performed);
         }
+    }
+
+    /// CR 608.2c: Does any node in this local ability chain carry an
+    /// `EffectOutcome { OptionalEffectPerformed }` ("if you do") gate? Mirrors the
+    /// traversal of [`Self::set_optional_effect_performed_recursive`] (self →
+    /// sub-ability → else-branch). Used at the paid during-resolution cast-commit
+    /// point to gate the retroactive latch: only a stashed continuation carrying
+    /// such a rider (Conduit of Worlds' "If you do, you can't cast additional
+    /// spells this turn") is stamped, so the shared cast-finalize path does not
+    /// misfire on a during-resolution cast without an "if you do" rider (Cascade,
+    /// Discover) or on a normal hand cast.
+    pub fn has_optional_effect_performed_gate(&self) -> bool {
+        self.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+            || self
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| sub.has_optional_effect_performed_gate())
+            || self
+                .else_ability
+                .as_ref()
+                .is_some_and(|else_branch| else_branch.has_optional_effect_performed_gate())
     }
 
     /// CR 608.2d: Stamp `context.guess_outcome` across the local ability chain.

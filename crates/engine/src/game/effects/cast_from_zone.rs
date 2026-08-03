@@ -565,15 +565,24 @@ pub fn resolve(
             .get(&target_ids[0])
             .is_some_and(|obj| obj.zone == Zone::Graveyard);
 
-    // CR 608.2g + CR 609.4b: paid during-resolution graveyard cast (Quistis Trepe,
-    // Tinybones the Pickpocket). Not without_paying — the caster pays the real cost
-    // with any-type mana. Offered accept/decline, resolved by
-    // initiate_cast_during_resolution with ResolutionCastCost::FullCost. Replaces
-    // the wrong lingering-permission path (#2884: the offer was inert on
-    // opponent-graveyard targets, and own-graveyard targets deferred the cast to a
-    // later priority window instead of a resolution-time offer).
+    // CR 608.2g + CR 609.4b: paid during-resolution graveyard cast. The caster
+    // pays the real printed cost as the granting ability resolves; the mana is
+    // any-type when `mana_spend_permission` is `Some` (Quistis Trepe, Tinybones
+    // the Pickpocket) and NORMAL mana at the printed cost when it is `None`
+    // (Conduit of Worlds: "Choose target nonland permanent card in your graveyard
+    // … you may cast that card."). Both thread `ResolutionCastCost::FullCost`
+    // through `initiate_cast_during_resolution`, which defaults a `None`
+    // permission to normal mana. Offered accept/decline. Replaces the wrong
+    // lingering-permission path (#2884: the offer was inert on opponent-graveyard
+    // targets, and own-graveyard targets deferred the cast to a later priority
+    // window instead of a resolution-time offer). The gate no longer requires
+    // `mana_spend_permission.is_some()`: the only pre-existing `DuringResolution`
+    // graveyard producer that reaches here with `mana_spend_permission: None` is
+    // the new Conduit-class anaphor (`parent_target_is_graveyard_scoped`) — every
+    // legacy any-mana producer sets `Some(AnyTypeOrColor)`, and all free casts
+    // take `without_paying`, so this relaxation changes behavior for exactly the
+    // normal-mana normal-cost class and nothing else.
     let graveyard_paid_cast = !without_paying
-        && mana_spend_permission.is_some()
         && driver.is_during_resolution()
         && alt_ability_cost.is_none()
         && duration.is_none()

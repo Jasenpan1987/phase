@@ -9611,6 +9611,28 @@ fn finalize_cast_with_phyrexian_choices_inner(
         object_id,
     });
 
+    // CR 608.2c + CR 608.2g + CR 601.2i: A paid during-resolution cast is the
+    // "performed optional" the moment its spell is on the stack and its mana is
+    // paid — this line is reached only on full payment completion (a pause
+    // returns earlier, and a cancelled/rewound cast never emits SpellCast), so an
+    // unpayable or declined cast never latches. When the granting ability parked
+    // an "If you do, …" rider as a continuation (Conduit of Worlds: "you may cast
+    // that card. If you do, you can't cast additional spells this turn."), that
+    // rider's `EffectOutcome { OptionalEffectPerformed }` gate must now evaluate
+    // true, so propagate the signal into the stashed continuation. Gated on the
+    // gate's presence so the shared finalize path does not misfire: a normal hand
+    // cast is announced only at a priority window (no `AbilityContinuation` frame
+    // is stack-top there), and a during-resolution cast with no "if you do" rider
+    // (Cascade, Discover) carries no such gate, so neither is latched.
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        if frame.pending.chain.has_optional_effect_performed_gate() {
+            frame
+                .pending
+                .chain
+                .set_optional_effect_performed_recursive(true);
+        }
+    }
+
     // CR 601.2a + CR 601.2b + CR 110.4: Record permission usage when the spell
     // is finalized onto the stack. This prevents casting a second spell via the
     // same source/slot before the first resolves. Only frequency-bounded

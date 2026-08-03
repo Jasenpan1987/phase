@@ -832,6 +832,20 @@ fn restriction_scope_matches_player(
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }
+        // CR 109.5 + CR 611.2c: the affected "you" ("you can't cast additional
+        // spells this turn" — Conduit of Worlds) is the player who activated the
+        // ability, fixed at resolution. `add_restriction` lowers
+        // `SourceController` to `SpecificPlayer` at creation so the ban stays with
+        // the activator even after the source leaves play or changes controller —
+        // reading it live here would silently drop the ban when the source is
+        // gone (`source_controller == None`). An unresolved scope here is a bug.
+        RestrictionPlayerScope::SourceController => {
+            debug_assert!(
+                false,
+                "SourceController should be resolved by add_restriction"
+            );
+            false
+        }
     }
 }
 
