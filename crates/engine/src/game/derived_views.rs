@@ -21,7 +21,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetRef,
+    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
