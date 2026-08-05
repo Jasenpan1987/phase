@@ -15536,9 +15536,9 @@ mod stage2_injector_tests {
                 // because that is what makes a NEW mint a counted event; a function +
                 // content-hash anchor would end the drift class while keeping that property,
                 // and is offered as a follow-up rather than taken unannounced mid-review.
-                "game/effects/mod.rs:6175".to_string(),
-                "game/effects/mod.rs:6252".to_string(),
-                "game/effects/mod.rs:9456".to_string(),
+                "game/effects/mod.rs:6177".to_string(),
+                "game/effects/mod.rs:6254".to_string(),
+                "game/effects/mod.rs:9458".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -15651,11 +15651,10 @@ mod stage2_injector_tests {
                 // failure this census exists to catch) cannot survive.
                 //
                 // Still inside `begin_pending_trigger_target_selection` (opens `:11547`).
-                // SET PRESERVATION: `git diff --stat upstream/main...HEAD` on
-                // `effects/mod.rs` and `effects/scoped_library_search.rs` is EMPTY, so
-                // `:6175/:6252/:9456/:452` could not have moved and stand re-read in place.
-                // Total still **5**.
-                "game/engine.rs:11696".to_string(),
+                // PR #7041's typed trigger-provenance initializers sit above the
+                // first three effects producers and this engine producer. CI
+                // re-derived the same five writes at these coordinates.
+                "game/engine.rs:11697".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
