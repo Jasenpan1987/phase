@@ -963,6 +963,7 @@ mod urzas_saga_chapter_two;
 mod urzas_tower_conditional_mana;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod veteran_armorsmith_soldier_anthem;
+mod veyran_storm_source_scope;
 mod vigor_regression;
 mod vincents_limit_break_tiered;
 mod virulent_emissary_trigger;
