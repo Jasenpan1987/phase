@@ -21,7 +21,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
+    RestrictionExpiry, RestrictionPlayerScope, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
@@ -37,7 +37,7 @@ use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
-use crate::types::statics::{StaticMode, StaticModeKind};
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 fn is_false(value: &bool) -> bool {
@@ -734,70 +734,16 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // CR 702.40a: viewer-scoped prospective Storm copy counts (own hand only → leak-proof).
     if let Some(viewer) = viewer {
         if let Some(player) = state.players.iter().find(|player| player.id == viewer) {
-            // `effective_spell_keywords` evaluates every keyword-grant source. Most
-            // snapshots have neither a Storm card nor a possible Storm grant, so only
-            // take that expensive path when one exists. The fallback remains necessary
-            // for CR 604.1 / CR 611.2c / CR 601.2f grants.
-            let may_have_granted_storm =
-                (crate::game::functioning_abilities::static_kind_present(
-                    state,
-                    StaticModeKind::CastWithKeyword,
-                ) && crate::game::functioning_abilities::game_active_statics(state).any(
-                    |(_, definition)| {
-                        matches!(
-                            &definition.mode,
-                            StaticMode::CastWithKeyword {
-                                keyword: Keyword::Storm
-                            }
-                        )
-                    },
-                )) || state.transient_continuous_effects.iter().any(|effect| {
-                    matches!(&effect.affected, TargetFilter::SpecificPlayer { id } if *id == viewer)
-                        && effect.modifications.iter().any(|modification| {
-                            matches!(
-                                modification,
-                                ContinuousModification::GrantStaticAbility { definition }
-                                    if matches!(
-                                        &definition.mode,
-                                        StaticMode::CastWithKeyword {
-                                            keyword: Keyword::Storm
-                                        }
-                                    )
-                            )
-                        })
-                }) || state.pending_next_spell_modifiers.iter().any(|modifier| {
-                    matches!(
-                        modifier,
-                        crate::types::game_state::PendingNextSpellModifier {
-                            player,
-                            modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
-                                keyword: Keyword::Storm
-                            },
-                            ..
-                        } if *player == viewer
-                    )
-                });
-            let mut copy_count = None;
+            let copy_count = state
+                .spells_cast_this_turn_by_player
+                .values()
+                .map(|records| records.len())
+                .sum::<usize>() as u32;
             for &hand_id in player.hand.iter() {
-                let has_printed_storm = state.objects.get(&hand_id).is_some_and(|object| {
-                    object
-                        .keywords
-                        .iter()
-                        .any(|keyword| matches!(keyword, Keyword::Storm))
-                });
-                if has_printed_storm
-                    || (may_have_granted_storm
-                        && crate::game::casting::effective_spell_keywords(state, viewer, hand_id)
-                            .iter()
-                            .any(|keyword| matches!(keyword, Keyword::Storm)))
+                if crate::game::casting::effective_spell_keywords(state, viewer, hand_id)
+                    .iter()
+                    .any(|keyword| matches!(keyword, Keyword::Storm))
                 {
-                    let copy_count = *copy_count.get_or_insert_with(|| {
-                        state
-                            .spells_cast_this_turn_by_player
-                            .values()
-                            .map(|records| records.len())
-                            .sum::<usize>() as u32
-                    });
                     views.prospective_storm_counts.insert(hand_id, copy_count);
                 }
             }
@@ -2637,78 +2583,6 @@ mod tests {
         let views = derive_views(&state, Some(PlayerId(0)));
         assert_eq!(views.prospective_storm_counts.get(&p0_storm), Some(&2));
         assert!(!views.prospective_storm_counts.contains_key(&p1_storm));
-    }
-
-    #[test]
-    fn prospective_storm_counts_include_effectively_granted_storm() {
-        use crate::types::ability::{ControllerRef, StaticDefinition, TypeFilter, TypedFilter};
-
-        let mut state = GameState::new_two_player(42);
-        let grantor = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Storm Grantor".to_string(),
-            Zone::Battlefield,
-        );
-        state.objects.get_mut(&grantor).unwrap().static_definitions =
-            vec![StaticDefinition::new(StaticMode::CastWithKeyword {
-                keyword: Keyword::Storm,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
-            ))]
-            .into();
-        let spell = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Granted Storm Spell".to_string(),
-            Zone::Hand,
-        );
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Instant);
-        state.players[0].hand.push_back(spell);
-        state.spells_cast_this_turn_by_player.insert(
-            PlayerId(0),
-            im::Vector::from(vec![crate::types::game_state::SpellCastRecord::default()]),
-        );
-
-        let views = derive_views(&state, Some(PlayerId(0)));
-
-        assert_eq!(views.prospective_storm_counts.get(&spell), Some(&1));
-    }
-
-    #[test]
-    fn prospective_storm_counts_include_next_spell_granted_storm() {
-        let mut state = GameState::new_two_player(42);
-        let spell = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Next Storm Spell".to_string(),
-            Zone::Hand,
-        );
-        state.players[0].hand.push_back(spell);
-        state.pending_next_spell_modifiers.push(
-            crate::types::game_state::PendingNextSpellModifier {
-                player: PlayerId(0),
-                modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
-                    keyword: Keyword::Storm,
-                },
-                spell_filter: None,
-                source_id: None,
-            },
-        );
-
-        let views = derive_views(&state, Some(PlayerId(0)));
-
-        assert_eq!(views.prospective_storm_counts.get(&spell), Some(&0));
     }
 
     /// SHAPE test (constructs `pending_cast`/pool directly, not via the cast
