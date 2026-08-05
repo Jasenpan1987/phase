@@ -4449,7 +4449,6 @@ mod tests {
             events: Vec::new(),
             match_count: Some(2),
             die_result: None,
-            provenance: None,
         };
         let restored = restore_v1_ability_fixture(
             state,
@@ -5514,7 +5513,6 @@ mod tests {
             events: Vec::new(),
             match_count: None,
             die_result: None,
-            provenance: None,
         };
         let mut orphan_choose_context =
             serde_json::to_value(GameState::new_two_player(152)).expect("v1 serializes");
