@@ -51,6 +51,7 @@ import { MobileHeldHandCard } from "./MobileHeldHandCard.tsx";
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
 const EMPTY_OBJECTS: Record<string, GameObject> = {};
+const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
 // The whole-row fan geometry — the overlap / tilt / arc that lays hand cards
 // (plus the castable exile / graveyard "wings") out as one held hand — now
@@ -82,6 +83,9 @@ export function PlayerHand() {
   // otherwise rebuild the drag-end callback on every update.
   const hand = player?.hand;
   const objects = useGameStore((s) => s.gameState?.objects);
+  const prospectiveStormCounts = useGameStore(
+    (s) => s.gameState?.derived?.prospective_storm_counts ?? EMPTY_STORM_COUNTS,
+  );
   const mobileHandGesture = useUiStore((s) => s.mobileHandGesture);
   // Use dispatchAction (animation pipeline) instead of store dispatch
   const inspectObject = useUiStore((s) => s.inspectObject);
@@ -663,6 +667,7 @@ export function PlayerHand() {
               isSelected={selectedCardId === obj.id}
               hasPriority={hasPriority}
               isMobile={isMobile}
+              stormCopyCount={prospectiveStormCounts[String(obj.id)]}
               onDragEnd={handleDragEnd}
               onDrag={handleDrag}
               onClick={handleCardClick}
@@ -784,6 +789,11 @@ export function PlayerHand() {
             ? objects[mobileHandGesture.objectId]
             : null
         }
+        stormCopyCount={
+          mobileHandGesture
+            ? prospectiveStormCounts[String(mobileHandGesture.objectId)]
+            : undefined
+        }
       />
     </>
   );
@@ -811,6 +821,7 @@ interface HandCardProps {
   isDragging: boolean;
   hasPriority: boolean;
   isMobile: boolean;
+  stormCopyCount?: number;
   onDragStart: (id: number) => void;
   onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
@@ -843,6 +854,7 @@ const HandCard = memo(function HandCard({
   isDragging,
   hasPriority,
   isMobile,
+  stormCopyCount,
   onDragStart: onDragStartProp,
   onDragStop,
   onDragEnd,
@@ -852,6 +864,7 @@ const HandCard = memo(function HandCard({
   onMouseEnter,
   onMouseLeave,
 }: HandCardProps) {
+  const { t } = useTranslation("game");
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setDragging = useUiStore((s) => s.setDragging);
   const isMobileDragged = useUiStore(
@@ -997,6 +1010,14 @@ const HandCard = memo(function HandCard({
           unimplementedMechanics={unimplementedMechanics}
           className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
         />
+        {stormCopyCount !== undefined && (
+          <span
+            className="pointer-events-none absolute -right-1 -top-2 rounded-full bg-violet-700 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow-md"
+            title={t("storm.copies", { count: stormCopyCount })}
+          >
+            {stormCopyCount}
+          </span>
+        )}
         {/* Inner-edge drop highlights. Always rendered, normally invisible; their
             opacity is driven by MotionValues so the glow toggles without a
             re-render. They sit inside the displaced + rotated card, so they track

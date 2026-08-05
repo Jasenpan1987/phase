@@ -22,6 +22,7 @@ import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.t
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
 const EMPTY_OBJECTS: Record<string, GameObject> = {};
+const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
 export function MobileHandDrawer() {
   const { t } = useTranslation("game");
@@ -30,6 +31,9 @@ export function MobileHandDrawer() {
   const playerId = usePerspectivePlayerId();
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const prospectiveStormCounts = useGameStore(
+    (s) => s.gameState?.derived?.prospective_storm_counts ?? EMPTY_STORM_COUNTS,
+  );
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
@@ -200,6 +204,7 @@ export function MobileHandDrawer() {
                     manaCost={obj.mana_cost}
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
+                    stormCopyCount={prospectiveStormCounts[String(obj.id)]}
                     onPlay={playCard}
                     onDebugOpen={handleDebugOpen}
                   />
@@ -219,6 +224,7 @@ interface DrawerCardProps {
   manaCost: ManaCost;
   isPlayable: boolean;
   hasPriority: boolean;
+  stormCopyCount?: number;
   onPlay: (objectId: number) => void;
   onDebugOpen: (objectId: number, x: number, y: number) => void;
 }
@@ -229,9 +235,11 @@ const DrawerCard = memo(function DrawerCard({
   manaCost,
   isPlayable,
   hasPriority,
+  stormCopyCount,
   onPlay,
   onDebugOpen,
 }: DrawerCardProps) {
+  const { t } = useTranslation("game");
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
@@ -296,6 +304,14 @@ const DrawerCard = memo(function DrawerCard({
       <div className="pointer-events-none absolute inset-0 @container">
         <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
       </div>
+      {stormCopyCount !== undefined && (
+        <span
+          className="pointer-events-none absolute right-1 top-1 rounded-full bg-violet-700 px-1.5 py-0.5 text-[11px] font-bold leading-none text-white shadow-md"
+          title={t("storm.copies", { count: stormCopyCount })}
+        >
+          {stormCopyCount}
+        </span>
+      )}
     </button>
   );
 });

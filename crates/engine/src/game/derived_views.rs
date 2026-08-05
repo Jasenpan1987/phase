@@ -30,6 +30,7 @@ use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
+    SyntheticTriggerProvenance,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -98,6 +99,10 @@ pub struct StackEntryDisplay {
     pub paid: Vec<StackPaidFactView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_context: Vec<TriggerContextDisplay>,
+    /// Typed synthesized-trigger presentation provenance. This is the only
+    /// stack provenance surface consumed by the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SyntheticTriggerProvenance>,
 }
 
 /// A single player-affecting condition the HUD surfaces as a status icon.
@@ -281,6 +286,12 @@ pub struct DerivedViews {
     /// paid cast facts, and public trigger context. Empty when the stack is empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stack_entry_details: HashMap<ObjectId, StackEntryDisplay>,
+
+    /// CR 702.40a: copy counts for Storm spells in the viewing player's hand.
+    /// Keyed only by that viewer's hand object ids so hidden opponents' card
+    /// abilities and the table-wide spell ledger cannot leak through the view.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub prospective_storm_counts: HashMap<ObjectId, u32>,
 
     /// CR 303.4 + CR 702.5: Auras attached to each player (Curse cycle,
     /// Faith's Fetters-class). Players have no `attachments` back-link
@@ -720,8 +731,25 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // answer.
     views.copied_permanents.sort_unstable();
 
-    // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
+    // CR 702.40a: viewer-scoped prospective Storm copy counts (own hand only → leak-proof).
     if let Some(viewer) = viewer {
+        if let Some(player) = state.players.iter().find(|player| player.id == viewer) {
+            let copy_count = state
+                .spells_cast_this_turn_by_player
+                .values()
+                .map(|records| records.len())
+                .sum::<usize>() as u32;
+            for &hand_id in player.hand.iter() {
+                if crate::game::casting::effective_spell_keywords(state, viewer, hand_id)
+                    .iter()
+                    .any(|keyword| matches!(keyword, Keyword::Storm))
+                {
+                    views.prospective_storm_counts.insert(hand_id, copy_count);
+                }
+            }
+        }
+
+        // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
         let has_web_slinging_static =
             crate::game::functioning_abilities::game_active_statics(state).any(|(_, def)| {
                 matches!(
@@ -1398,6 +1426,12 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
+        provenance: match &entry.kind {
+            StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::KeywordAction { .. } => None,
+        },
     }
 }
 
@@ -2484,6 +2518,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -2502,6 +2537,52 @@ mod tests {
             empty.stack_display_groups.is_empty(),
             "empty-stack short-circuit must leave the group vec empty"
         );
+    }
+
+    #[test]
+    fn prospective_storm_counts_are_viewer_scoped() {
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_storm = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grapeshot".to_string(),
+            Zone::Hand,
+        );
+        let p1_storm = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Empty the Warrens".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&p0_storm)
+            .unwrap()
+            .keywords
+            .push(Keyword::Storm);
+        state
+            .objects
+            .get_mut(&p1_storm)
+            .unwrap()
+            .keywords
+            .push(Keyword::Storm);
+        state.players[0].hand.push_back(p0_storm);
+        state.players[1].hand.push_back(p1_storm);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![
+                crate::types::game_state::SpellCastRecord::default();
+                2
+            ]),
+        );
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(views.prospective_storm_counts.get(&p0_storm), Some(&2));
+        assert!(!views.prospective_storm_counts.contains_key(&p1_storm));
     }
 
     /// SHAPE test (constructs `pending_cast`/pool directly, not via the cast
@@ -2746,6 +2827,7 @@ mod tests {
             targets: Vec::new(),
             paid: Vec::new(),
             trigger_context: Vec::new(),
+            provenance: None,
         };
         let empty_json = serde_json::to_string(&empty).expect("serialize empty display");
         assert!(
@@ -2845,6 +2927,7 @@ mod tests {
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -2965,6 +3048,7 @@ mod tests {
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
                 provenance,
             )

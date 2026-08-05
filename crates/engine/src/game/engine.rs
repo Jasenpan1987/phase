@@ -10091,6 +10091,7 @@ fn apply_action(
                 may_trigger_origin: None,
                 subject_match_count: None,
         die_result: None,
+            provenance: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -14609,6 +14610,7 @@ mod stage2_injector_tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             }
         };
@@ -14720,6 +14722,7 @@ mod stage2_injector_tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
             state
@@ -15185,6 +15188,7 @@ mod stage2_injector_tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -16161,6 +16165,7 @@ mod stage2_injector_tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         }));
         let prompt = cursor_live.waiting_for.clone();
         assert_eq!(
@@ -17291,6 +17296,7 @@ mod bounded_offer_conjunct_tests {
                         source_name: String::new(),
                         subject_match_count: None,
                         die_result: None,
+                        provenance: None,
                     },
                 }
             })
