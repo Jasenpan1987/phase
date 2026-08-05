@@ -72,6 +72,9 @@ fn first_spell_storm_grant_is_snapshotted_before_cast_recording() {
                 provenance: Some(SyntheticTriggerProvenance::Storm { copy_count }),
                 ..
             } => Some(*copy_count),
+            StackEntryKind::TriggeredAbility {
+                provenance: None, ..
+            } => None,
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
             | StackEntryKind::KeywordAction { .. } => None,
