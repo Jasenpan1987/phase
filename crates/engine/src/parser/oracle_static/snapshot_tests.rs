@@ -829,11 +829,14 @@ fn gandalf_the_white_doubler_static() {
         },
         "Gandalf must parse as legendary-or-artifact battlefield transition doubling"
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'permanent you control' source must leave affected None, got {:?}",
-        def.affected
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "Gandalf's permanent source must preserve its scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 #[test]
