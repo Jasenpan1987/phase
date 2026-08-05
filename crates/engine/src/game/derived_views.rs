@@ -2738,6 +2738,58 @@ mod tests {
     }
 
     #[test]
+    fn stack_entry_details_projects_storm_provenance_to_the_client_wire() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grapeshot".to_string(),
+            Zone::Stack,
+        );
+        let trigger = ObjectId(2);
+        state.stack.push_back(StackEntry {
+            id: trigger,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "storm".to_string(),
+                        description: None,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some("Storm".to_string()),
+                source_name: "Grapeshot".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: Some(SyntheticTriggerProvenance::Storm { copy_count: 2 }),
+            },
+        });
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.stack_entry_details[&trigger].provenance,
+            Some(SyntheticTriggerProvenance::Storm { copy_count: 2 }),
+            "the stack detail projection carries typed Storm provenance"
+        );
+
+        let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+            .expect("serialize client game state");
+        assert_eq!(
+            wire["derived"]["stack_entry_details"][trigger.0.to_string()]["provenance"],
+            serde_json::json!({"type": "Storm", "data": {"copy_count": 2}}),
+            "the frontend's derived stack-detail wire retains Storm provenance",
+        );
+    }
+
+    #[test]
     fn pending_modal_spell_details_survive_filtering_and_client_wire_round_trip() {
         let mut state = GameState::new_two_player(42);
         let spell = create_object(
