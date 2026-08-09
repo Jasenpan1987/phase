@@ -1888,6 +1888,7 @@ mod tests {
             action: PlayerActionKind::Draw,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         let draw_entries = resolve_log_entries(&[draw_event], &state, &state);
         assert!(
@@ -1903,6 +1904,7 @@ mod tests {
             action: PlayerActionKind::Scry,
             look_count: Some(1),
             scry_bottom_count: Some(0),
+            scry_top_count: Some(1),
         };
         let scry_entries = resolve_log_entries(&[scry_event], &state, &state);
         assert_eq!(
