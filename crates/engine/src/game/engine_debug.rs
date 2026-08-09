@@ -1231,6 +1231,13 @@ mod tests {
         apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
             .expect("replacement choice resumes the serial batch");
 
+        assert!(matches!(
+            restored.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+            .expect("the remaining entrant presents and resumes its own replacement choice");
+
         assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
         assert!(restored.resolution_stack.is_empty());
         assert_eq!(

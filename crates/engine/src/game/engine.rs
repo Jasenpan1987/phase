@@ -15991,9 +15991,11 @@ mod stage2_injector_tests {
                 // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
                 // #7018 adds the 16-line distinct-player-scope continuation gate above all
                 // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
-                "game/effects/mod.rs:6228".to_string(),
-                "game/effects/mod.rs:6305".to_string(),
-                "game/effects/mod.rs:9493".to_string(),
+                // This PR's three-frame debug-entry resumer extends the same
+                // shift: `:6228/:6305/:9493 => :6231/:6308/:9496`.
+                "game/effects/mod.rs:6231".to_string(),
+                "game/effects/mod.rs:6308".to_string(),
+                "game/effects/mod.rs:9496".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16308,7 +16310,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:11874".to_string(),
+                "game/engine.rs:11902".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
