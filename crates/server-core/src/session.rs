@@ -4649,6 +4649,44 @@ mod tests {
     }
 
     #[test]
+    fn revoked_seat_cannot_create_debug_cards_through_server_card_database() {
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = create_sandbox_game(&mut mgr);
+        let (guest_token, _state) = mgr
+            .join_game_with_name(&code, make_deck(), "Guest".to_string())
+            .expect("guest joins");
+
+        mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect("host revokes the guest's debug permission");
+
+        // The server's source-bound CreateCard path must not skip the shared
+        // Debug(_) admission gate before attempting card-database resolution.
+        let err = mgr
+            .handle_action_with_card_db(
+                &code,
+                &guest_token,
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "Any Card".to_string(),
+                    owner: PlayerId(1),
+                    zone: Zone::Battlefield,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+                None,
+            )
+            .expect_err("revoked guests cannot reach the server CreateCard path");
+        assert_eq!(err, "Debug actions are not permitted for this seat");
+    }
+
+    #[test]
     fn host_can_grant_debug_to_guest() {
         let mut mgr = SessionManager::new();
         let (code, host_token) = create_sandbox_game(&mut mgr);
