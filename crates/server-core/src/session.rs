@@ -1477,7 +1477,7 @@ impl SessionManager {
                     owner,
                     zone,
                     count,
-                    attach_to: attach_to.clone(),
+                    attach_to,
                     run_etb,
                     nonlegendary,
                 };
