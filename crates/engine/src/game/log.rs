@@ -656,6 +656,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         GameEvent::PlayerPerformedAction {
+            player_id,
+            action: crate::types::events::PlayerActionKind::Scry,
+            look_count: Some(look_count),
+            scry_bottom_count: Some(scry_bottom_count),
+            ..
+        } => vec![
+            player_seg(state, *player_id),
+            text(" scries "),
+            num(*look_count as i32),
+            text(": "),
+            num(look_count.saturating_sub(*scry_bottom_count) as i32),
+            text(" on top and "),
+            num(*scry_bottom_count as i32),
+            text(" on bottom"),
+        ],
+        GameEvent::PlayerPerformedAction {
             player_id, action, ..
         } => vec![
             player_seg(state, *player_id),
@@ -1727,6 +1743,41 @@ mod tests {
         assert!(
             has_card_name,
             "Expected CardName segment with 'Lightning Bolt'"
+        );
+    }
+
+    #[test]
+    fn completed_scry_has_a_public_count_only_log_entry() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(3),
+                scry_bottom_count: Some(2),
+                scry_top_count: Some(1),
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.visibility, LogVisibility::Public);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" scries ".to_string()),
+                LogSegment::Number(3),
+                LogSegment::Text(": ".to_string()),
+                LogSegment::Number(1),
+                LogSegment::Text(" on top and ".to_string()),
+                LogSegment::Number(2),
+                LogSegment::Text(" on bottom".to_string()),
+            ]
         );
     }
 

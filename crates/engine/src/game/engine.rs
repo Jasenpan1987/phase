@@ -978,6 +978,22 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    // A zero-count debug create is intentionally a true no-op. It still passes
+    // both the ordinary action-authority check and the sandbox capability
+    // gate, but must not enter an action lifecycle frame: doing so would bump
+    // revisions, run finalization, and make the WASM adapter invalidate a
+    // replay despite no object having been requested.
+    if let GameAction::Debug(debug_action) = &action {
+        if debug_action.is_zero_count_create() {
+            check_actor_authorization(state, authenticated_actor, &action)?;
+            check_debug_action_access(state, semantic_owner)?;
+            return Ok(ActionResult {
+                events: vec![],
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            });
+        }
+    }
     let raw = apply_action_boundary_core(
         state,
         authenticated_actor,
@@ -4346,7 +4362,7 @@ fn drive_loop_action_iteration(
                 let source = match &context {
                     crate::types::game_state::ManaChoiceContext::ManaAbility(p) => p.source_id,
                     crate::types::game_state::ManaChoiceContext::ResolvingEffect(_) => {
-                        return Err(RecastAbort)
+                        return Err(RecastAbort);
                     }
                 };
                 let color = pinned_mana_color_for_source(template, iteration, clone, source)?;
@@ -7009,16 +7025,10 @@ fn apply_action(
     // a defense-in-depth invariant — a player not in `debug_permitted` should
     // never have reached `apply`.
     if let GameAction::Debug(debug_action) = action {
-        if !state.debug_mode {
-            return Err(EngineError::InvalidAction(
-                "Debug actions require debug_mode to be enabled".into(),
-            ));
-        }
-        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
-            return Err(EngineError::InvalidAction(
-                "Debug actions require debug permission".into(),
-            ));
-        }
+        check_debug_action_access(state, actor)?;
+        debug_action
+            .validate_create_count()
+            .map_err(EngineError::InvalidAction)?;
         let description = debug_action.describe(state);
         let mut result =
             super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events)?;
@@ -10795,6 +10805,7 @@ fn apply_action(
                 action: PlayerActionKind::Proliferate,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             });
             let pending = state
                 .take_active_proliferate_frame()
@@ -11565,6 +11576,23 @@ fn apply_action(
         waiting_for,
         log_entries: vec![],
     })
+}
+
+/// Sandbox capability check shared by normal debug actions and a zero-count
+/// create no-op. Keeping it at the engine boundary means transports cannot use
+/// a no-op payload to probe or bypass debug authorization.
+fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), EngineError> {
+    if !state.debug_mode {
+        return Err(EngineError::InvalidAction(
+            "Debug actions require debug_mode to be enabled".into(),
+        ));
+    }
+    if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+        return Err(EngineError::InvalidAction(
+            "Debug actions require debug permission".into(),
+        ));
+    }
+    Ok(())
 }
 
 struct RetargetSubmission<'a> {
