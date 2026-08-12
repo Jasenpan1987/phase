@@ -528,6 +528,7 @@ pub fn resolve(
     let effective_targets = if origin == Some(Zone::Exile)
         && dest_zone == Zone::Battlefield
         && matches!(target_filter, TargetFilter::ParentTarget)
+        && !ability.target_incarnations.is_empty()
     {
         delayed_exile_return_targets(state, ability)
     } else {
@@ -1698,13 +1699,20 @@ pub fn resolve_all(
     let effective_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
 
+    // CR 608.2c: A delayed `ChangeZone` that names its parent object is
+    // upgraded to a tracked-set mass move. Bind that anaphor to the delayed
+    // ability's creation-time targets before matching the set; otherwise a
+    // `ParentTarget` inner filter has no live parent context at the later phase
+    // trigger and incorrectly selects no members (Niko, Light of Hope).
+    let effective_filter =
+        crate::game::filter::normalize_contextual_filter(&effective_filter, &ability.targets);
+
     // CR 400.7 + CR 603.7c: only a tracked set whose member filter still names
     // the delayed ability's parent object is governed by its incarnation pin.
-    // Ordinary tracked-set returns (for example Niko, Light of Hope) are
-    // already constrained by their exile origin and must be able to return a
-    // card that the earlier leg moved there.
-    let tracked_members_name_parent_object =
-        tracked_set_filter_names_parent_object(&target_filter) && dest_zone != Zone::Battlefield;
+    // A parent-bound return may enter the battlefield, so destination does not
+    // weaken the pin: after a later zone change, that same object id denotes a
+    // different game object and must not be returned.
+    let tracked_members_name_parent_object = tracked_set_filter_names_parent_object(&target_filter);
 
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
     // the initial `origin`/`target` snapshot may have defaulted to the
@@ -7785,6 +7793,61 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: An unpinned ParentTarget return still resolves through the
+    /// current event context. The delayed-return pin exception must not bypass
+    /// that normal target authority merely because its zones are Exile →
+    /// Battlefield.
+    #[test]
+    fn unpinned_exile_return_uses_event_context_parent_target() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Event Context Subject".to_string(),
+            Zone::Exile,
+        );
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Battlefield),
+            to: Zone::Exile,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Battlefield),
+                Zone::Exile,
+            )),
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("event-context return resolves");
+
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Battlefield,
+            "an unpinned ParentTarget return must use the triggering event's object"
+        );
+    }
+
     /// CR 400.7 + CR 603.7c: Parent-bound tracked-set membership preserves the
     /// delayed ability's incarnation pins through composite filter shapes.
     #[test]
@@ -7832,71 +7895,73 @@ mod tests {
             ),
         ];
 
-        for (target, peer_should_move) in nested_filters {
-            let mut state = GameState::new_two_player(42);
-            let parent = create_object(
-                &mut state,
-                CardId(1),
-                PlayerId(0),
-                "Stale Parent".to_string(),
-                Zone::Exile,
-            );
-            let peer = create_object(
-                &mut state,
-                CardId(2),
-                PlayerId(0),
-                "Tracked Peer".to_string(),
-                Zone::Exile,
-            );
-            let set_id = TrackedSetId(1);
-            state.tracked_object_sets.insert(set_id, vec![parent, peer]);
-            state.tracked_set_member_causes.insert(
-                set_id,
-                [(parent, crate::types::ability::ThisWayCause::Exiled)]
-                    .into_iter()
-                    .collect(),
-            );
+        for destination in [Zone::Graveyard, Zone::Battlefield] {
+            for (target, peer_should_move) in &nested_filters {
+                let mut state = GameState::new_two_player(42);
+                let parent = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    "Stale Parent".to_string(),
+                    Zone::Exile,
+                );
+                let peer = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "Tracked Peer".to_string(),
+                    Zone::Exile,
+                );
+                let set_id = TrackedSetId(1);
+                state.tracked_object_sets.insert(set_id, vec![parent, peer]);
+                state.tracked_set_member_causes.insert(
+                    set_id,
+                    [(parent, crate::types::ability::ThisWayCause::Exiled)]
+                        .into_iter()
+                        .collect(),
+                );
 
-            let mut ability = ResolvedAbility::new(
-                Effect::ChangeZoneAll {
-                    origin: Some(Zone::Exile),
-                    destination: Zone::Graveyard,
-                    target,
-                    enters_under: None,
-                    enter_tapped: EtbTapState::Unspecified,
-                    enter_with_counters: vec![],
-                    face_down_profile: None,
-                    library_position: None,
-                    random_order: false,
-                },
-                vec![TargetRef::Object(parent)],
-                ObjectId(100),
-                PlayerId(0),
-            );
-            ability.target_incarnations = vec![ObjectIncarnationRef::of(parent, 1)];
-            let mut events = Vec::new();
+                let mut ability = ResolvedAbility::new(
+                    Effect::ChangeZoneAll {
+                        origin: Some(Zone::Exile),
+                        destination,
+                        target: target.clone(),
+                        enters_under: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                        library_position: None,
+                        random_order: false,
+                    },
+                    vec![TargetRef::Object(parent)],
+                    ObjectId(100),
+                    PlayerId(0),
+                );
+                ability.target_incarnations = vec![ObjectIncarnationRef::of(parent, 1)];
+                let mut events = Vec::new();
 
-            resolve_all(&mut state, &ability, &mut events).expect("nested set move resolves");
+                resolve_all(&mut state, &ability, &mut events).expect("nested set move resolves");
 
-            assert_eq!(
-                state.objects[&parent].zone,
-                Zone::Exile,
-                "a stale parent target must not be moved through a nested tracked set"
-            );
-            assert_eq!(
-                state.objects[&peer].zone,
-                if peer_should_move {
-                    Zone::Graveyard
-                } else {
-                    Zone::Exile
-                },
-                "the non-parent branch must retain its own nested-filter behavior"
-            );
-            assert!(
-                state.tracked_object_sets.contains_key(&set_id)
-                    && state.tracked_set_member_causes.contains_key(&set_id),
-                "a filtered member selection must retain its set for a later sibling consumer"
-            );
+                assert_eq!(
+                    state.objects[&parent].zone,
+                    Zone::Exile,
+                    "a stale parent target must not be moved through a nested tracked set"
+                );
+                assert_eq!(
+                    state.objects[&peer].zone,
+                    if *peer_should_move {
+                        destination
+                    } else {
+                        Zone::Exile
+                    },
+                    "the non-parent branch must retain its own nested-filter behavior"
+                );
+                assert!(
+                    state.tracked_object_sets.contains_key(&set_id)
+                        && state.tracked_set_member_causes.contains_key(&set_id),
+                    "a filtered member selection must retain its set for a later sibling consumer"
+                );
+            }
         }
     }
 
