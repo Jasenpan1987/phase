@@ -1646,6 +1646,16 @@ pub fn resolve_all(
     let effective_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
 
+    // CR 400.7 + CR 603.7c: only a tracked set whose member filter still names
+    // the delayed ability's parent object is governed by its incarnation pin.
+    // Ordinary tracked-set returns (for example Niko, Light of Hope) must be
+    // able to return a card that the earlier leg moved to exile.
+    let tracked_members_name_parent_object = matches!(
+        &target_filter,
+        TargetFilter::TrackedSetFiltered { filter, .. }
+            if super::delayed_trigger::filter_refs_parent_object_anaphor(filter)
+    );
+
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
     // the initial `origin`/`target` snapshot may have defaulted to the
     // battlefield before `chain_tracked_set_id` was populated (Zimone's
@@ -1726,7 +1736,8 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
-                    && ability.target_pin_is_current(id, state)
+                    && (!tracked_members_name_parent_object
+                        || ability.target_pin_is_current(id, state))
                     && crate::game::filter::matches_target_filter(
                         state,
                         id,
@@ -1759,8 +1770,11 @@ pub fn resolve_all(
     };
 
     // Clean up consumed tracked set after scanning.
-    if let TargetFilter::TrackedSet { id } = &effective_filter {
+    if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } =
+        &effective_filter
+    {
         state.tracked_object_sets.remove(id);
+        // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
         state.tracked_set_member_causes.remove(id);
     }
 
