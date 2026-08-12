@@ -211,11 +211,8 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
 /// set wrapped by an `And`, `Or`, or `Not` composition.
 fn tracked_set_ids(filter: &TargetFilter, ids: &mut Vec<TrackedSetId>) {
     match filter {
-        TargetFilter::TrackedSet { id } => {
-            if !ids.contains(id) {
-                ids.push(*id);
-            }
-        }
+        TargetFilter::TrackedSet { id } if !ids.contains(id) => ids.push(*id),
+        TargetFilter::TrackedSet { .. } => {}
         TargetFilter::TrackedSetFiltered { id, filter, .. } => {
             if !ids.contains(id) {
                 ids.push(*id);
