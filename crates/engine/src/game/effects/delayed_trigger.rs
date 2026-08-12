@@ -3792,7 +3792,7 @@ mod tests {
         assert!(delayed.target_pin_is_current(creature, &state));
         assert_eq!(delayed.targets, vec![TargetRef::Object(creature)]);
         assert!(matches!(
-            delayed.effect,
+            &delayed.effect,
             Effect::ChangeZoneAll {
                 target: TargetFilter::TrackedSetFiltered {
                     id,
