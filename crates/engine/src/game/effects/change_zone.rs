@@ -1648,13 +1648,14 @@ pub fn resolve_all(
 
     // CR 400.7 + CR 603.7c: only a tracked set whose member filter still names
     // the delayed ability's parent object is governed by its incarnation pin.
-    // Ordinary tracked-set returns (for example Niko, Light of Hope) must be
-    // able to return a card that the earlier leg moved to exile.
+    // Ordinary tracked-set returns (for example Niko, Light of Hope) are
+    // already constrained by their exile origin and must be able to return a
+    // card that the earlier leg moved there.
     let tracked_members_name_parent_object = matches!(
         &target_filter,
         TargetFilter::TrackedSetFiltered { filter, .. }
             if super::delayed_trigger::filter_refs_parent_object_anaphor(filter)
-    );
+    ) && dest_zone != Zone::Battlefield;
 
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
     // the initial `origin`/`target` snapshot may have defaulted to the
