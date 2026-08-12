@@ -15,7 +15,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCounterPostAction, PendingZoneChangeDelivery, WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::{EtbTapState, Zone};
@@ -204,6 +204,73 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
             zones
         });
     (!zones.is_empty()).then_some(zones)
+}
+
+/// CR 400.7 + CR 603.7c: Return every concrete tracked-set identity nested in
+/// a filter tree. A delayed mass move consumes every set it reads, including a
+/// set wrapped by an `And`, `Or`, or `Not` composition.
+fn tracked_set_ids(filter: &TargetFilter, ids: &mut Vec<TrackedSetId>) {
+    match filter {
+        TargetFilter::TrackedSet { id } => {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        TargetFilter::TrackedSetFiltered { id, filter, .. } => {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+            tracked_set_ids(filter, ids);
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for filter in filters {
+                tracked_set_ids(filter, ids);
+            }
+        }
+        TargetFilter::Not { filter } => tracked_set_ids(filter, ids),
+        _ => {}
+    }
+}
+
+/// CR 400.7 + CR 603.7c: A delayed tracked-set move must validate its
+/// incarnation pins when any nested set member filter names the creation-time
+/// parent object. The anaphor walk is the shared recursive authority.
+fn tracked_set_filter_names_parent_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            super::delayed_trigger::filter_refs_parent_object_anaphor(filter)
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(tracked_set_filter_names_parent_object)
+        }
+        TargetFilter::Not { filter } => tracked_set_filter_names_parent_object(filter),
+        _ => false,
+    }
+}
+
+/// CR 603.7c: A direct delayed Exile → Battlefield return may follow the
+/// parent ability's exile move, so its creation-time target pin is one
+/// incarnation behind the expected exile object. Accept that exact successor,
+/// but not an object that later left exile and returned as another incarnation.
+fn delayed_exile_return_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    ability
+        .targets
+        .iter()
+        .filter(|target| match target {
+            TargetRef::Player(_) => true,
+            TargetRef::Object(id) => ability
+                .target_incarnations
+                .iter()
+                .find(|pin| pin.object_id == *id)
+                .is_none_or(|pin| {
+                    pin.is_current(state)
+                        || state.objects.get(id).is_some_and(|object| {
+                            pin.incarnation.checked_add(1) == Some(object.incarnation)
+                        })
+                }),
+        })
+        .cloned()
+        .collect()
 }
 
 /// CR 110.2a: Resolve the optional `enters_under` controller override to a
@@ -480,16 +547,15 @@ pub fn resolve(
     // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
     // effects whose subject can be the source itself, an event-context
     // referent, or a pre-selected target. See `targeting::resolved_targets`.
-    // CR 400.7 + CR 608.2c: A phase-delayed "return it" instruction follows
-    // this resolution's own Exile move. The delayed snapshot predates that
-    // move, so its incarnation pin is intentionally stale by the time this
-    // Exile → Battlefield instruction fires; the explicit exile origin remains
-    // the identity guard. Do not apply the general ParentTarget pin filter here.
+    // CR 603.7c: A phase-delayed "return it" instruction follows this
+    // resolution's own Exile move. Its creation-time pin is therefore one
+    // incarnation behind the expected exile object, but a later leave-and-return
+    // creates a further incarnation that the delayed trigger must not affect.
     let effective_targets = if origin == Some(Zone::Exile)
         && dest_zone == Zone::Battlefield
         && matches!(target_filter, TargetFilter::ParentTarget)
     {
-        ability.targets.clone()
+        delayed_exile_return_targets(state, ability)
     } else {
         crate::game::targeting::resolved_targets(ability, target_filter, state)
     };
@@ -1663,11 +1729,8 @@ pub fn resolve_all(
     // Ordinary tracked-set returns (for example Niko, Light of Hope) are
     // already constrained by their exile origin and must be able to return a
     // card that the earlier leg moved there.
-    let tracked_members_name_parent_object = matches!(
-        &target_filter,
-        TargetFilter::TrackedSetFiltered { filter, .. }
-            if super::delayed_trigger::filter_refs_parent_object_anaphor(filter)
-    ) && dest_zone != Zone::Battlefield;
+    let tracked_members_name_parent_object =
+        tracked_set_filter_names_parent_object(&target_filter) && dest_zone != Zone::Battlefield;
 
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
     // the initial `origin`/`target` snapshot may have defaulted to the
@@ -1782,13 +1845,13 @@ pub fn resolve_all(
         matching
     };
 
-    // Clean up consumed tracked set after scanning.
-    if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } =
-        &effective_filter
-    {
-        state.tracked_object_sets.remove(id);
+    // Clean up every tracked set consumed by the filter tree after scanning.
+    let mut consumed_tracked_sets = Vec::new();
+    tracked_set_ids(&effective_filter, &mut consumed_tracked_sets);
+    for id in consumed_tracked_sets {
+        state.tracked_object_sets.remove(&id);
         // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
-        state.tracked_set_member_causes.remove(id);
+        state.tracked_set_member_causes.remove(&id);
     }
 
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
@@ -7695,6 +7758,173 @@ mod tests {
         );
         assert!(!state.tracked_object_sets.contains_key(&set_id));
         assert!(!state.tracked_set_member_causes.contains_key(&set_id));
+    }
+
+    /// CR 603.7c + CR 400.7: A delayed return may follow its own exile move,
+    /// but the named card must not return after it later leaves exile and comes
+    /// back as a new object.
+    #[test]
+    fn delayed_exile_return_rejects_a_reexiled_target_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Delayed Return Subject".to_string(),
+            Zone::Battlefield,
+        );
+        let initial_pin = ObjectIncarnationRef::from_object(&state.objects[&card]);
+        let mut events = Vec::new();
+
+        zones::move_to_zone(&mut state, card, Zone::Exile, &mut events);
+        zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        zones::move_to_zone(&mut state, card, Zone::Exile, &mut events);
+
+        let mut delayed_return = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(card)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        delayed_return.target_incarnations = vec![initial_pin];
+
+        resolve(&mut state, &delayed_return, &mut events).expect("delayed return resolves");
+
+        assert_eq!(
+            state.objects[&card].zone,
+            Zone::Exile,
+            "a re-exiled object is a new incarnation and must not be returned"
+        );
+    }
+
+    /// CR 400.7 + CR 603.7c: Parent-bound tracked-set membership and its
+    /// cleanup remain correct when the set is nested in every composite filter
+    /// shape accepted by the filter normalizer.
+    #[test]
+    fn nested_parent_bound_tracked_sets_apply_pins_and_cleanup() {
+        let nested_filters = vec![
+            (
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::TrackedSetFiltered {
+                            id: TrackedSetId(1),
+                            filter: Box::new(TargetFilter::ParentTarget),
+                            caused_by: None,
+                        },
+                        TargetFilter::Any,
+                    ],
+                },
+                false,
+            ),
+            (
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::TrackedSetFiltered {
+                            id: TrackedSetId(1),
+                            filter: Box::new(TargetFilter::ParentTarget),
+                            caused_by: None,
+                        },
+                        TargetFilter::TrackedSetFiltered {
+                            id: TrackedSetId(1),
+                            filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(2) }),
+                            caused_by: None,
+                        },
+                    ],
+                },
+                true,
+            ),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::TrackedSetFiltered {
+                        id: TrackedSetId(1),
+                        filter: Box::new(TargetFilter::ParentTarget),
+                        caused_by: None,
+                    }),
+                },
+                true,
+            ),
+        ];
+
+        for (target, peer_should_move) in nested_filters {
+            let mut state = GameState::new_two_player(42);
+            let parent = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Stale Parent".to_string(),
+                Zone::Exile,
+            );
+            let peer = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Tracked Peer".to_string(),
+                Zone::Exile,
+            );
+            let set_id = TrackedSetId(1);
+            state.tracked_object_sets.insert(set_id, vec![parent, peer]);
+            state.tracked_set_member_causes.insert(
+                set_id,
+                [(parent, crate::types::ability::ThisWayCause::Exiled)]
+                    .into_iter()
+                    .collect(),
+            );
+
+            let mut ability = ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Graveyard,
+                    target,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    random_order: false,
+                },
+                vec![TargetRef::Object(parent)],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.target_incarnations = vec![ObjectIncarnationRef::of(parent, 1)];
+            let mut events = Vec::new();
+
+            resolve_all(&mut state, &ability, &mut events).expect("nested set move resolves");
+
+            assert_eq!(
+                state.objects[&parent].zone,
+                Zone::Exile,
+                "a stale parent target must not be moved through a nested tracked set"
+            );
+            assert_eq!(
+                state.objects[&peer].zone,
+                if peer_should_move {
+                    Zone::Graveyard
+                } else {
+                    Zone::Exile
+                },
+                "the non-parent branch must retain its own nested-filter behavior"
+            );
+            assert!(
+                !state.tracked_object_sets.contains_key(&set_id)
+                    && !state.tracked_set_member_causes.contains_key(&set_id),
+                "every nested tracked-set consumer must clear both membership and provenance"
+            );
+        }
     }
 
     /// Zimone's Experiment: tracked-set routing must scan the members' actual zone
