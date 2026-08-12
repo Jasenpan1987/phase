@@ -127,7 +127,13 @@ pub fn resolve(
         }
     }
 
-    bind_contextual_filter_to_condition(&mut condition, &ability.targets);
+    let root_chain_targets = crate::game::targeting::parent_chain_targets_from_root(state, ability);
+    let condition_parent_targets = if root_chain_targets.is_empty() {
+        &ability.targets
+    } else {
+        &root_chain_targets
+    };
+    bind_contextual_filter_to_condition(&mut condition, condition_parent_targets);
 
     // CR 603.7b: "until your next turn" is fixed at CREATION. The parser emits the
     // symbolic `AfterCreationTurn` floor (compile-time AST has no runtime turn
@@ -651,15 +657,7 @@ fn concrete_parent_target_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {
-    // This condition-binding path historically treats an absent declared
-    // parent slot as unconstrained; preserve that contract while the shared
-    // mass-effect normalizer correctly uses `None` to match no objects.
-    match filter {
-        TargetFilter::ParentTargetSlot { index } if parent_targets.get(*index).is_none() => {
-            TargetFilter::Any
-        }
-        _ => crate::game::filter::normalize_contextual_filter(filter, parent_targets),
-    }
+    crate::game::filter::normalize_contextual_filter(filter, parent_targets)
 }
 
 fn bind_tracked_set_to_condition(condition: &mut DelayedTriggerCondition, real_id: TrackedSetId) {
