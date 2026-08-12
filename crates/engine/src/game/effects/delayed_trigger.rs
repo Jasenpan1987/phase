@@ -3800,7 +3800,7 @@ mod tests {
                     caused_by: None,
                 },
                 ..
-            } if id == set_id && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+            } if *id == set_id && matches!(filter.as_ref(), TargetFilter::ParentTarget)
         ));
 
         let mut current_state = state.clone();
