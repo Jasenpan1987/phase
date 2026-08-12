@@ -15,7 +15,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCounterPostAction, PendingZoneChangeDelivery, WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::{EtbTapState, Zone};
@@ -204,29 +204,6 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
             zones
         });
     (!zones.is_empty()).then_some(zones)
-}
-
-/// CR 400.7 + CR 603.7c: Return every concrete tracked-set identity nested in
-/// a filter tree. A delayed mass move consumes every set it reads, including a
-/// set wrapped by an `And`, `Or`, or `Not` composition.
-fn tracked_set_ids(filter: &TargetFilter, ids: &mut Vec<TrackedSetId>) {
-    match filter {
-        TargetFilter::TrackedSet { id } if !ids.contains(id) => ids.push(*id),
-        TargetFilter::TrackedSet { .. } => {}
-        TargetFilter::TrackedSetFiltered { id, filter, .. } => {
-            if !ids.contains(id) {
-                ids.push(*id);
-            }
-            tracked_set_ids(filter, ids);
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            for filter in filters {
-                tracked_set_ids(filter, ids);
-            }
-        }
-        TargetFilter::Not { filter } => tracked_set_ids(filter, ids),
-        _ => {}
-    }
 }
 
 /// CR 400.7 + CR 603.7c: A delayed tracked-set move must validate its
@@ -1842,13 +1819,13 @@ pub fn resolve_all(
         matching
     };
 
-    // Clean up every tracked set consumed by the filter tree after scanning.
-    let mut consumed_tracked_sets = Vec::new();
-    tracked_set_ids(&effective_filter, &mut consumed_tracked_sets);
-    for id in consumed_tracked_sets {
-        state.tracked_object_sets.remove(&id);
+    // A bare tracked set has one consumer. A `TrackedSetFiltered` can have a
+    // later sibling consumer (for example, Winding Way's "the rest" clause),
+    // so its producer owns that set's eventual cleanup.
+    if let TargetFilter::TrackedSet { id } = &effective_filter {
+        state.tracked_object_sets.remove(id);
         // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
-        state.tracked_set_member_causes.remove(&id);
+        state.tracked_set_member_causes.remove(id);
     }
 
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
@@ -7808,11 +7785,10 @@ mod tests {
         );
     }
 
-    /// CR 400.7 + CR 603.7c: Parent-bound tracked-set membership and its
-    /// cleanup remain correct when the set is nested in every composite filter
-    /// shape accepted by the filter normalizer.
+    /// CR 400.7 + CR 603.7c: Parent-bound tracked-set membership preserves the
+    /// delayed ability's incarnation pins through composite filter shapes.
     #[test]
-    fn nested_parent_bound_tracked_sets_apply_pins_and_cleanup() {
+    fn nested_parent_bound_tracked_sets_apply_pins() {
         let nested_filters = vec![
             (
                 TargetFilter::And {
@@ -7917,9 +7893,9 @@ mod tests {
                 "the non-parent branch must retain its own nested-filter behavior"
             );
             assert!(
-                !state.tracked_object_sets.contains_key(&set_id)
-                    && !state.tracked_set_member_causes.contains_key(&set_id),
-                "every nested tracked-set consumer must clear both membership and provenance"
+                state.tracked_object_sets.contains_key(&set_id)
+                    && state.tracked_set_member_causes.contains_key(&set_id),
+                "a filtered member selection must retain its set for a later sibling consumer"
             );
         }
     }
@@ -7956,12 +7932,6 @@ mod tests {
         state
             .tracked_object_sets
             .insert(set_id, vec![land, creature]);
-        state.tracked_set_member_causes.insert(
-            set_id,
-            [(land, crate::types::ability::ThisWayCause::Exiled)]
-                .into_iter()
-                .collect(),
-        );
         state.chain_tracked_set_id = Some(set_id);
 
         let land_filter = TargetFilter::Typed(TypedFilter {
@@ -7995,8 +7965,6 @@ mod tests {
         assert_eq!(state.objects[&land].zone, Zone::Battlefield);
         assert!(state.objects[&land].tapped);
         assert_eq!(state.objects[&creature].zone, Zone::Library);
-        assert!(!state.tracked_object_sets.contains_key(&set_id));
-        assert!(!state.tracked_set_member_causes.contains_key(&set_id));
     }
 
     #[test]
