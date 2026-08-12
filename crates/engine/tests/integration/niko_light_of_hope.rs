@@ -11,7 +11,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Duration, Effect, PlayerScope, TargetFilter, TypeFilter,
+    AbilityDefinition, ControllerRef, Duration, Effect, PlayerScope, TargetFilter, TargetRef,
+    TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -342,6 +343,22 @@ fn c_opponent_turn_co_fire_reverts_and_returns() {
         "copy active while the effect persists"
     );
     assert_eq!(outcome.zone_of(donor), Zone::Exile);
+    let delayed_return = outcome
+        .state()
+        .delayed_triggers
+        .iter()
+        .find(|trigger| trigger.ability.targets.contains(&TargetRef::Object(donor)))
+        .expect("Niko's delayed return must retain its exiled donor");
+    assert_eq!(
+        delayed_return
+            .ability
+            .target_incarnations
+            .iter()
+            .find(|pin| pin.object_id == donor)
+            .map(|pin| pin.incarnation),
+        Some(outcome.state().objects[&donor].incarnation),
+        "the return must pin the donor's exile incarnation at delayed-trigger creation"
+    );
 
     // Advance to the opponent's (P1's) end step. The end-step prune runs at End
     // entry (before end-step triggers), so the turn-agnostic copy expires here.
