@@ -1759,9 +1759,7 @@ pub fn resolve_all(
     };
 
     // Clean up consumed tracked set after scanning.
-    if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } =
-        &effective_filter
-    {
+    if let TargetFilter::TrackedSet { id } = &effective_filter {
         state.tracked_object_sets.remove(id);
         state.tracked_set_member_causes.remove(id);
     }

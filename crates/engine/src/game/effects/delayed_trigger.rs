@@ -651,7 +651,15 @@ fn concrete_parent_target_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {
-    crate::game::filter::normalize_contextual_filter(filter, parent_targets)
+    // This condition-binding path historically treats an absent declared
+    // parent slot as unconstrained; preserve that contract while the shared
+    // mass-effect normalizer correctly uses `None` to match no objects.
+    match filter {
+        TargetFilter::ParentTargetSlot { index } if parent_targets.get(*index).is_none() => {
+            TargetFilter::Any
+        }
+        _ => crate::game::filter::normalize_contextual_filter(filter, parent_targets),
+    }
 }
 
 fn bind_tracked_set_to_condition(condition: &mut DelayedTriggerCondition, real_id: TrackedSetId) {
