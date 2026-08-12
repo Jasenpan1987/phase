@@ -1030,8 +1030,6 @@ fn entered_perturbs_quantity(
     })
 }
 
-/// CR 608.2c: Resolve contextual parent-target references before an object scan.
-///
 /// `ParentTarget` and `ParentTargetSlot` are resolution-time references, not
 /// object-matcher predicates. Normalize them to their concrete parent targets
 /// before a composite filter reaches `matches_target_filter`.
@@ -1046,9 +1044,8 @@ pub fn normalize_contextual_filter(
                 TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
             ) =>
         {
-            // CR 608.2c: exclude the concrete parent object(s). `ParentTarget`
-            // excludes every parent object; `ParentTargetSlot { index }` excludes
-            // only the object at that one declared slot.
+            // `ParentTarget` excludes every parent object; `ParentTargetSlot { index }`
+            // excludes only the object at that one declared slot.
             let object_ids: Vec<ObjectId> = match inner.as_ref() {
                 TargetFilter::ParentTargetSlot { index } => parent_targets
                     .get(*index)
@@ -1088,7 +1085,7 @@ pub fn normalize_contextual_filter(
         TargetFilter::ParentTargetSlot { index } => parent_targets
             .get(*index)
             .map(target_ref_filter)
-            .unwrap_or(TargetFilter::Any),
+            .unwrap_or(TargetFilter::None),
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .iter()
@@ -1109,6 +1106,11 @@ pub fn normalize_contextual_filter(
             id: *id,
             filter: Box::new(normalize_contextual_filter(filter, parent_targets)),
             caused_by: *caused_by,
+        },
+        TargetFilter::ChosenDamageSource { filter } => TargetFilter::ChosenDamageSource {
+            filter: filter
+                .as_ref()
+                .map(|inner| Box::new(normalize_contextual_filter(inner, parent_targets))),
         },
         _ => filter.clone(),
     }
@@ -10532,6 +10534,28 @@ mod tests {
                 filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(7) }),
                 caused_by: None,
             }
+        );
+    }
+
+    #[test]
+    fn normalize_contextual_filter_missing_positive_parent_target_slot_matches_nothing() {
+        assert_eq!(
+            normalize_contextual_filter(&TargetFilter::ParentTargetSlot { index: 1 }, &[]),
+            TargetFilter::None,
+        );
+    }
+
+    #[test]
+    fn normalize_contextual_filter_binds_parent_target_inside_chosen_damage_source() {
+        let filter = TargetFilter::ChosenDamageSource {
+            filter: Some(Box::new(TargetFilter::ParentTargetSlot { index: 0 })),
+        };
+
+        assert_eq!(
+            normalize_contextual_filter(&filter, &[TargetRef::Object(ObjectId(7))]),
+            TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(TargetFilter::SpecificObject { id: ObjectId(7) })),
+            },
         );
     }
 

@@ -1759,9 +1759,10 @@ pub fn resolve_all(
     };
 
     // Clean up consumed tracked set after scanning.
-    if let TargetFilter::TrackedSet { id } = &effective_filter {
+    if let TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } =
+        &effective_filter
+    {
         state.tracked_object_sets.remove(id);
-        // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
         state.tracked_set_member_causes.remove(id);
     }
 
@@ -7634,6 +7635,12 @@ mod tests {
         let set_id = TrackedSetId(state.next_tracked_set_id);
         state.next_tracked_set_id += 1;
         state.tracked_object_sets.insert(set_id, vec![exiled]);
+        state.tracked_set_member_causes.insert(
+            set_id,
+            [(exiled, crate::types::ability::ThisWayCause::Exiled)]
+                .into_iter()
+                .collect(),
+        );
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
@@ -7661,6 +7668,8 @@ mod tests {
             Zone::Battlefield,
             "Exiled creature must return to the battlefield when TrackedSetId(0) is resolved"
         );
+        assert!(!state.tracked_object_sets.contains_key(&set_id));
+        assert!(!state.tracked_set_member_causes.contains_key(&set_id));
     }
 
     /// Zimone's Experiment: tracked-set routing must scan the members' actual zone
@@ -7695,6 +7704,12 @@ mod tests {
         state
             .tracked_object_sets
             .insert(set_id, vec![land, creature]);
+        state.tracked_set_member_causes.insert(
+            set_id,
+            [(land, crate::types::ability::ThisWayCause::Exiled)]
+                .into_iter()
+                .collect(),
+        );
         state.chain_tracked_set_id = Some(set_id);
 
         let land_filter = TargetFilter::Typed(TypedFilter {
@@ -7728,6 +7743,8 @@ mod tests {
         assert_eq!(state.objects[&land].zone, Zone::Battlefield);
         assert!(state.objects[&land].tapped);
         assert_eq!(state.objects[&creature].zone, Zone::Library);
+        assert!(!state.tracked_object_sets.contains_key(&set_id));
+        assert!(!state.tracked_set_member_causes.contains_key(&set_id));
     }
 
     #[test]
