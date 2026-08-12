@@ -480,7 +480,19 @@ pub fn resolve(
     // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
     // effects whose subject can be the source itself, an event-context
     // referent, or a pre-selected target. See `targeting::resolved_targets`.
-    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
+    // CR 400.7 + CR 608.2c: A phase-delayed "return it" instruction follows
+    // this resolution's own Exile move. The delayed snapshot predates that
+    // move, so its incarnation pin is intentionally stale by the time this
+    // Exile → Battlefield instruction fires; the explicit exile origin remains
+    // the identity guard. Do not apply the general ParentTarget pin filter here.
+    let effective_targets = if origin == Some(Zone::Exile)
+        && dest_zone == Zone::Battlefield
+        && matches!(target_filter, TargetFilter::ParentTarget)
+    {
+        ability.targets.clone()
+    } else {
+        crate::game::targeting::resolved_targets(ability, target_filter, state)
+    };
     let targeted_objects =
         crate::game::effects::effect_object_targets(target_filter, &effective_targets);
     // CR 730.3c: when this effect references the object that just left the
