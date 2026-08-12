@@ -349,14 +349,16 @@ fn c_opponent_turn_co_fire_reverts_and_returns() {
         .iter()
         .find(|trigger| trigger.ability.targets.contains(&TargetRef::Object(donor)))
         .expect("Niko's delayed return must retain its exiled donor");
+    let delayed_return_pin = delayed_return
+        .ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == donor)
+        .map(|pin| pin.incarnation)
+        .expect("Niko's delayed return must retain the donor pin");
     assert_eq!(
-        delayed_return
-            .ability
-            .target_incarnations
-            .iter()
-            .find(|pin| pin.object_id == donor)
-            .map(|pin| pin.incarnation),
-        Some(outcome.state().objects[&donor].incarnation),
+        delayed_return_pin,
+        outcome.state().objects[&donor].incarnation,
         "the return must pin the donor's exile incarnation at delayed-trigger creation"
     );
 
@@ -376,6 +378,11 @@ fn c_opponent_turn_co_fire_reverts_and_returns() {
         runner.state().objects[&shard].name,
         "Shard",
         "turn-agnostic copy must revert at the FIRST (opponent's) end step"
+    );
+    assert_eq!(
+        runner.state().objects[&donor].incarnation,
+        delayed_return_pin,
+        "the donor must still be the pin's current exile object before its delayed return resolves"
     );
 
     // Co-fire: the return delayed trigger (AtNextPhase{End}) resolves at the same
