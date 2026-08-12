@@ -222,26 +222,36 @@ fn tracked_set_filter_names_parent_object(filter: &TargetFilter) -> bool {
     }
 }
 
-/// CR 603.7c: A direct delayed Exile → Battlefield return may follow the
-/// parent ability's exile move, so its creation-time target pin is one
-/// incarnation behind the expected exile object. Accept that exact successor,
-/// but not an object that later left exile and returned as another incarnation.
+/// CR 603.7c: A delayed Exile → Battlefield return follows the parent
+/// ability's own exile move. Its creation-time target pin is therefore one
+/// incarnation behind the expected exile object; a later zone change creates a
+/// further incarnation which must not be returned.
+fn target_pin_is_current_or_delayed_exile_successor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+) -> bool {
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == object_id)
+        .is_none_or(|pin| {
+            pin.is_current(state)
+                || state.objects.get(&object_id).is_some_and(|object| {
+                    pin.incarnation.checked_add(1) == Some(object.incarnation)
+                })
+        })
+}
+
 fn delayed_exile_return_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     ability
         .targets
         .iter()
         .filter(|target| match target {
             TargetRef::Player(_) => true,
-            TargetRef::Object(id) => ability
-                .target_incarnations
-                .iter()
-                .find(|pin| pin.object_id == *id)
-                .is_none_or(|pin| {
-                    pin.is_current(state)
-                        || state.objects.get(id).is_some_and(|object| {
-                            pin.incarnation.checked_add(1) == Some(object.incarnation)
-                        })
-                }),
+            TargetRef::Object(id) => {
+                target_pin_is_current_or_delayed_exile_successor(state, ability, *id)
+            }
         })
         .cloned()
         .collect()
@@ -1709,9 +1719,9 @@ pub fn resolve_all(
 
     // CR 400.7 + CR 603.7c: only a tracked set whose member filter still names
     // the delayed ability's parent object is governed by its incarnation pin.
-    // A parent-bound return may enter the battlefield, so destination does not
-    // weaken the pin: after a later zone change, that same object id denotes a
-    // different game object and must not be returned.
+    // The Exile → Battlefield return immediately following the pinned exile is
+    // its one permitted successor; a later zone change is still a different
+    // object and must not be returned.
     let tracked_members_name_parent_object = tracked_set_filter_names_parent_object(&target_filter);
 
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
@@ -1729,6 +1739,7 @@ pub fn resolve_all(
     } else {
         origin_zones
     };
+    let delayed_exile_return = origin_zones == [Zone::Exile] && dest_zone == Zone::Battlefield;
 
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
@@ -1795,7 +1806,11 @@ pub fn resolve_all(
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
                     && (!tracked_members_name_parent_object
-                        || ability.target_pin_is_current(id, state))
+                        || if delayed_exile_return {
+                            target_pin_is_current_or_delayed_exile_successor(state, ability, id)
+                        } else {
+                            ability.target_pin_is_current(id, state)
+                        })
                     && crate::game::filter::matches_target_filter(
                         state,
                         id,
