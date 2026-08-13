@@ -599,6 +599,7 @@ mod issue_5247_kinetic_ooze_conditional_multi_target;
 mod issue_5252_additional_sacrifice_after_mana_abilities;
 mod issue_5254_declaration_in_stone_clue_owner;
 mod issue_5268_invincible_iron_man;
+mod issue_5271_overencumbered_tokens;
 mod issue_5274_call_the_spirit_dragons;
 mod issue_5279_grave_sifter;
 mod issue_5282_nissa_ultimate_emblem_search;
@@ -1049,6 +1050,7 @@ mod wolverine_fierce_fighter_heal;
 mod wrenn_and_six_up_to_one_optout;
 mod yare_extra_blockers;
 mod yavimaya_enchantress_dynamic_pump;
+mod yenna_aura_token_copy;
 mod yuriko_combat_damage;
 
 // Folded in from former top-level tests/*.rs files (each was its own ~130MB
@@ -1068,6 +1070,7 @@ mod ashling_delayed_sacrifice_unless_pay;
 mod atarkas_command_sequential_mode_after_decline;
 mod aurora_awakener_reveal_until_n_permanents;
 mod baron_helmut_zemo_boast;
+mod bartz_and_boko_each_source_damage;
 mod base_pt_dynamic_set_std_base_pt;
 mod become_color_set_std_batch;
 mod behold_chosen_object_power_damage;

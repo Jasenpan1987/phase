@@ -9986,14 +9986,13 @@ fn apply_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
-                    let old_target = match chosen {
-                        TargetRef::Object(chosen_id) => {
-                            super::effects::attach::attach_to(state, returned, chosen_id)
-                        }
-                        TargetRef::Player(chosen_player) => {
-                            super::effects::attach::attach_to_player(state, returned, chosen_player)
-                        }
-                    };
+                    // CR 303.4f + CR 701.3b: attach through the entering-Aura
+                    // authority, so the CR 701.3a gate judges the same entrant
+                    // the host list was offered for. Seams that park none get
+                    // the stored object, i.e. their prior behaviour exactly.
+                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
+                        state, returned, &chosen,
+                    );
                     if let Some(old_target) = old_target {
                         events.push(crate::types::events::GameEvent::Unattached {
                             attachment_id: returned,
@@ -16181,28 +16180,13 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // THIS BRANCH (reflexive materializer), REBASED ONTO `117b430c2`:
-                // `:6306/:6383/:9578 ⇒ :6429/:6506/:9701`, uniform +123 above all three.
-                // Cause is LOCAL — `build_reflexive_pending_trigger` plus the deferral arms
-                // inside `try_materialize_reflexive_trigger`, all of which sit above `:6306`
-                // in `game/effects/mod.rs` — so the CI-vs-local diagnosis in the header does
-                // not apply. Coordinates re-derived from this row's OWN failure output at the
-                // rebased tip, not carried over from either side of the rebase conflict.
-                // Identity re-established rather than assumed: each producer at its new
-                // coordinate is byte-identical to `117b430c2:game/effects/mod.rs` at its old
-                // one, and `scoped_library_search.rs:452` did not move at all — the
-                // set-preservation evidence that no producer was gained or lost.
-                //
-                // REVIEW ROUND 1 (QuantityCheck modal-gate restore + propagated-target
-                // invariant assert): `:6429/:6506/:9701 ⇒ :6454/:6531/:9726`, uniform +25
-                // above all three, all from this round's comment/assert insertions in
-                // `try_materialize_reflexive_trigger` and `build_reflexive_pending_trigger`.
-                // LOCAL again; coordinates re-derived from this row's own failure output.
-                // The engine.rs entry did not move (that round's engine.rs edit was an
-                // in-place one-line comment fix), which is the set-preservation evidence.
-                "game/effects/mod.rs:6454".to_string(),
-                "game/effects/mod.rs:6531".to_string(),
-                "game/effects/mod.rs:9726".to_string(),
+                // Maintainer port: current main moved the three producers to
+                // `:6632/:6709/:9914`; this PR's reflexive-trigger work adds 148 lines before
+                // the first two and 148 before the third, yielding the re-derived merge-tree
+                // coordinates below. The production set remains five entries.
+                "game/effects/mod.rs:6780".to_string(),
+                "game/effects/mod.rs:6857".to_string(),
+                "game/effects/mod.rs:10062".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16521,14 +16505,10 @@ mod stage2_injector_tests {
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
                 //
-                // THIS BRANCH (reflexive materializer), REBASED ONTO `117b430c2`: `:12004 ⇒
-                // :12059`, +55. LOCAL, not upstream — this branch's own engine.rs insertions
-                // (the deferred-drain gate and the trigger-construction finisher witness)
-                // land above this producer. Coordinate re-derived from this row's own
-                // failure output at the rebased tip; the line at `:12059` is byte-identical
-                // to `117b430c2:engine.rs:12004` and still inside
-                // `begin_pending_trigger_target_selection`.
-                "game/engine.rs:12059".to_string(),
+                // Maintainer port: current main's producer is at `:12003`; this PR's owner
+                // boundary/trigger-construction additions occur above it, producing `:12058`
+                // in the merged tree. It remains inside `begin_pending_trigger_target_selection`.
+                "game/engine.rs:12058".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
