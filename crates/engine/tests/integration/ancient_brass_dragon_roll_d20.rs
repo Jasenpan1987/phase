@@ -232,6 +232,18 @@ fn ancient_brass_dragon_zero_targets_is_clean_no_op() {
         }
     }
 
+    // Positive reach guard: the loop's error/other-prompt breaks may exit
+    // before the observation point, and the negative assertions below would
+    // vacuously pass on an unresolved trigger. Prove the settled window first.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "the zero-target reflexive must resolve to a settled priority window with an \
+         empty stack before the no-op is measured, got {:?} with {} stack entries",
+        runner.state().waiting_for,
+        runner.state().stack.len()
+    );
+
     // No graveyard card moved (still in a graveyard) and the battlefield count
     // did not grow from reanimation.
     for (id, _) in &grave {

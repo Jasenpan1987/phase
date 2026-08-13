@@ -2220,7 +2220,17 @@ fn build_reflexive_pending_trigger(
     parent: Option<&ResolvedAbility>,
 ) -> crate::game::triggers::PendingTrigger {
     let mut ability = reflexive.clone();
-    debug_assert_eq!(ability.condition, Some(AbilityCondition::WhenYouDo));
+    // The modal router accepts a `QuantityCheck` resolution gate as well as the
+    // `WhenYouDo` creation gate (both dispatch here at the call sites); the
+    // consume below strips only `WhenYouDo`, so a `QuantityCheck` survives onto
+    // the stack object and is re-checked at resolution per CR 603.4.
+    debug_assert!(
+        matches!(
+            ability.condition,
+            Some(AbilityCondition::WhenYouDo) | Some(AbilityCondition::QuantityCheck { .. })
+        ),
+        "build_reflexive_pending_trigger requires a WhenYouDo or QuantityCheck gate"
+    );
     consume_reflexive_creation_gate(&mut ability);
 
     let source_id = parent.map_or(ability.source_id, |parent| parent.source_id);
@@ -2300,6 +2310,7 @@ fn try_materialize_reflexive_trigger_inner(
     // the same resolution-scoped referents that the pending trigger will later
     // carry. Stamp one clone before `build_target_slots` so chosen-player and
     // amassed-Army filters enumerate legal targets from the actual parent event.
+    let mut propagated_parent_targets = false;
     let reflexive_context_owned;
     let reflexive = if let Some(parent) = parent {
         let mut owned = reflexive.clone();
@@ -2339,6 +2350,7 @@ fn try_materialize_reflexive_trigger_inner(
             && should_propagate_parent_targets(parent, &owned)
         {
             owned.targets = parent.targets.clone();
+            propagated_parent_targets = true;
         }
         apply_parent_chain_context(&mut owned, parent, effect_context_object, state);
         reflexive_context_owned = owned;
@@ -2355,10 +2367,12 @@ fn try_materialize_reflexive_trigger_inner(
     // pending trigger carrying the modal + per-mode abilities, then defer to the
     // shared modal-trigger router, which prompts `WaitingFor::AbilityModeChoice`
     // and only then collects each chosen mode's targets.
-    if creates_reflexive_trigger
-        && reflexive.modal.is_some()
-        && !reflexive.mode_abilities.is_empty()
-    {
+    // NOT gated on `creates_reflexive_trigger`: a target-less modal marker
+    // behind a `QuantityCheck` resolution gate must also route through the
+    // modal-trigger router (as it did before deferral), or the slot-less
+    // fallback below would return `Ok(false)` and the descent would resolve
+    // every mode without a `WaitingFor::AbilityModeChoice`.
+    if reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty() {
         let pending = build_reflexive_pending_trigger(state, reflexive, parent);
         let trigger_events =
             crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -2396,6 +2410,17 @@ fn try_materialize_reflexive_trigger_inner(
         }
         Err(error) => return Err(EffectError::InvalidParam(error.to_string())),
     };
+    // A parent-referent rider carries no declared slot of its own (that is the
+    // `ability_refs_parent_target` shape), so propagated targets and non-empty
+    // slots are mutually exclusive. If a future ability both reads a parent
+    // referent AND declares its own slot, the fresh stack-time selection below
+    // would clobber the bound referent — make that a counted event here rather
+    // than a silent exile-of-nothing at resolution.
+    debug_assert!(
+        !propagated_parent_targets || target_slots.is_empty(),
+        "a reflexive with propagated parent targets must be slot-less; \
+         a declared slot would re-prompt and clobber the bound referent"
+    );
     if target_slots.is_empty() {
         if creates_reflexive_trigger {
             let pending = build_reflexive_pending_trigger(state, reflexive, parent);
@@ -13164,8 +13189,18 @@ mod tests {
         let reflexive = reflexive_counter_ability(ObjectId(100));
         let mut events = Vec::new();
 
-        try_materialize_reflexive_trigger(&mut state, &reflexive, None, None, &mut events, 0)
-            .unwrap();
+        let materialized =
+            try_materialize_reflexive_trigger(&mut state, &reflexive, None, None, &mut events, 0)
+                .unwrap();
+
+        // Positive reach guard: the empty-state assertions below only prove the
+        // shared-dispatch DROP if the reflexive actually took the deferral path.
+        // An `Ok(false)` fall-through would leave the same empty state without
+        // exercising the dispatch at all.
+        assert!(
+            materialized,
+            "the reflexive must materialize into the deferral path before dispatch can drop it"
+        );
         crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events);
 
         assert!(state.deferred_triggers.is_empty());

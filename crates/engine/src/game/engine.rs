@@ -9394,7 +9394,7 @@ fn apply_action(
                     },
                     None,
                 )?;
-                // CR 605.1b + CR 605.4a: no outer scan. `activate_mana_ability`
+                // CR 605.4a: no outer scan. `activate_mana_ability`
                 // builds a real typed cursor here, and its completed frame has
                 // already run `collect_completed_mana_frame_events` — collecting
                 // TapsForMana multipliers and ordinary cost observers together
@@ -16192,9 +16192,17 @@ mod stage2_injector_tests {
                 // coordinate is byte-identical to `117b430c2:game/effects/mod.rs` at its old
                 // one, and `scoped_library_search.rs:452` did not move at all — the
                 // set-preservation evidence that no producer was gained or lost.
-                "game/effects/mod.rs:6429".to_string(),
-                "game/effects/mod.rs:6506".to_string(),
-                "game/effects/mod.rs:9701".to_string(),
+                //
+                // REVIEW ROUND 1 (QuantityCheck modal-gate restore + propagated-target
+                // invariant assert): `:6429/:6506/:9701 ⇒ :6454/:6531/:9726`, uniform +25
+                // above all three, all from this round's comment/assert insertions in
+                // `try_materialize_reflexive_trigger` and `build_reflexive_pending_trigger`.
+                // LOCAL again; coordinates re-derived from this row's own failure output.
+                // The engine.rs entry did not move (that round's engine.rs edit was an
+                // in-place one-line comment fix), which is the set-preservation evidence.
+                "game/effects/mod.rs:6454".to_string(),
+                "game/effects/mod.rs:6531".to_string(),
+                "game/effects/mod.rs:9726".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

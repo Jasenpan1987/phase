@@ -254,7 +254,7 @@ pub fn eliminate_players_simultaneously(
         if let Some(recipient) = state.pending_trigger_construction_priority_recipient {
             if !players::is_alive(state, recipient) {
                 state.pending_trigger_construction_priority_recipient =
-                    Some(players::next_player(state, recipient));
+                    Some(players::next_player_in_turn_order(state, recipient));
             }
         }
     }
@@ -3691,6 +3691,33 @@ mod tests {
             restored.pending_trigger_construction_priority_recipient,
             Some(PlayerId(2)),
             "the re-pointed recipient must survive trusted serde"
+        );
+    }
+
+    /// CR 800.4a + CR 101.4: the re-point follows the CURRENT turn-order
+    /// direction, not fixed seating. Under `TurnDirection::Reversed` the next
+    /// player in turn order after a departed P1 is P0, not seat-forward P2.
+    ///
+    /// Revert discriminator: `players::next_player` (seat-forward) re-points to
+    /// P2 here; `players::next_player_in_turn_order` re-points to P0.
+    #[test]
+    fn game_continues_repoints_a_departed_recipient_in_reversed_turn_order() {
+        let mut state = setup_three_player();
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        let entry = open_live_trigger_construction_prompt(&mut state, PlayerId(0));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+
+        concede(&mut state, PlayerId(1));
+
+        assert!(
+            state.stack.iter().any(|e| e.id == entry),
+            "P0's tracked entry survives an opponent's departure"
+        );
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(0)),
+            "under reversed turn order the departed recipient re-points backward \
+             through seating (the next player in TURN order), not seat-forward"
         );
     }
 }

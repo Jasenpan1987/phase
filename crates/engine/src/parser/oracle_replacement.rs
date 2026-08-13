@@ -3381,7 +3381,7 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
 ///
 /// Delegates to the existing effect-chain parser. The "when you do" connector
 /// maps to `AbilityCondition::WhenYouDo`; the "if you do" connector maps to
-/// `AbilityCondition::EffectOutcome { OptionalEffectPerformed }`. On the
+/// `AbilityCondition::EffectOutcome { OptionalEffectPerformed }`.
 /// At this owning accepted-branch seam, literal `When` keeps its CR 603.12
 /// `WhenYouDo` creation gate, while literal `If` has its CR 608.2c performed gate
 /// consumed because reaching the replacement's execute branch proves acceptance.

@@ -20766,6 +20766,26 @@ impl GameState {
             dt.ability.clear_trigger_identity_recursive();
             dt.provenance = DelayedInstallIdentity::LegacyDelayed;
         }
+        // The triggered-mana sidecar is eq-compared like its sibling carriers
+        // above, and it holds both ability carriers and a globally advancing
+        // `SettlementNodeOrdinal`. The live loop-sample sites only fire at
+        // `WaitingFor::Priority`, where the sidecar is None today — this
+        // normalization keeps that a non-load-bearing coincidence rather than a
+        // hidden precondition of CR 104.4b detection.
+        if let Some(resume) = clone.pending_triggered_mana_resume.as_mut() {
+            resume.current.pending.ability.clear_trigger_identity_recursive();
+            for ctx in resume.accepted_tail.iter_mut() {
+                ctx.pending.ability.clear_trigger_identity_recursive();
+            }
+            for batch in resume.collected_batches.iter_mut() {
+                for ctx in batch.contexts.iter_mut() {
+                    ctx.pending.ability.clear_trigger_identity_recursive();
+                }
+            }
+            resume.rules_execution_node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+                crate::types::resolved_commands::SettlementNodeOrdinal(0),
+            );
+        }
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.clear_trigger_identity_recursive();
         }
