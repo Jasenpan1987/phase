@@ -19881,13 +19881,10 @@ pub enum AbilityCondition {
     /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
-    /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
-    /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
-    /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
-    /// always occurred, so this is unconditionally true. For a cost-payment parent
-    /// (`Effect::PayCost`), an unpayable or declined cost is not an occurrence, so
-    /// the reflexive sub-ability is skipped — `evaluate_condition` gates on
-    /// `cost_payment_failed_flag` for that case (mirrors `IfYouDo`).
+    /// CR 603.12: Literal "When you do" creation gate for a reflexive triggered
+    /// ability. Once the antecedent occurred, the runtime materializer consumes
+    /// this root condition on the trigger clone so it cannot recreate itself.
+    /// Unpayable or declined cost antecedents do not create the trigger.
     WhenYouDo,
     /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
     /// executes only if the spell was cast. `zone: None` = cast from any origin;
@@ -24406,6 +24403,11 @@ pub struct ResolvedAbility {
     /// Each entry maps a target to its assigned portion. Read at resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<Vec<(TargetRef, u32)>>,
+    /// CR 601.2d + CR 603.3d: Unassigned division metadata carried from the
+    /// definition until this stack object's targets and portions are announced.
+    /// Distinct from `distribution`, which stores the completed assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribute: Option<DistributionUnit>,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24541,7 +24543,7 @@ pub struct ResolvedAbility {
     pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
-    /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
+    /// `try_materialize_reflexive_trigger` can hand it to the PendingTrigger and
     /// route to AbilityModeChoice. None for non-modal abilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
@@ -24598,6 +24600,7 @@ impl ResolvedAbility {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            distribute: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,

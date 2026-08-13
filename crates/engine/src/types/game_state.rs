@@ -6032,6 +6032,18 @@ pub struct ManaAbilityCostParent {
     pub cursor: Box<ManaAbilityCostCursor>,
     #[serde(default)]
     pub lifecycle: ManaAbilityCostParentLifecycle,
+    /// CR 603.2 + CR 603.3b: Index into the live reducer action's `events`
+    /// vector marking where this parent frame's own unscanned cost events
+    /// begin, while the lifecycle is `Synchronous`. Each nested child entry
+    /// prepares a fresh local snapshot whose ledger is extended with
+    /// `events[current_action_event_start..]`, so a later pausing child
+    /// inherits the parent prefix plus every earlier synchronously completed
+    /// sibling. It is never consulted once the parent becomes `Suspended`,
+    /// because the pause has already made that prefix durable, so it is not
+    /// serialized. Distinct from `ManaAbilityCostCursor::current_action_deferred_start`,
+    /// which indexes the local ledger rather than the event vector.
+    #[serde(skip)]
+    pub current_action_event_start: usize,
 }
 
 /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The unpaid suffix of an
@@ -6079,16 +6091,18 @@ pub struct ManaAbilityCostCursor {
     /// before the cost cursor advances to the next component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_sacrifice_remaining: Option<Vec<ObjectId>>,
-    /// CR 603.2 + CR 603.3b: Cost events produced before a replacement-choice
-    /// pause cannot reach the ordinary post-action pipeline. Keep them with
-    /// their typed payment root so observers are collected exactly once when
-    /// that root completes.
+    /// CR 603.2 + CR 603.3b: Frame-local cost events produced before a
+    /// replacement-choice pause cannot reach the ordinary post-action
+    /// pipeline. Each cursor owns only its own unscanned events; an ancestor's
+    /// ledger remains opaque in `parent` until a suspended child moves its
+    /// local ledger upward. Only the ultimate parentless cursor may settle the
+    /// accumulated batch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_cost_events: Vec<GameEvent>,
-    /// Ephemeral split point for the active reducer action. It lets a newly
-    /// nested typed root prepend its parent's unscanned batch without copying
-    /// the local events this root already captured on pause. The split is
-    /// consumed before state is returned to a player, so it is not serialized.
+    /// Ephemeral split point into this cursor's frame-local ledger for the
+    /// active reducer action. It lets an immediately re-paused ultimate root
+    /// retain its already captured local suffix while inherited root events
+    /// move in front of that suffix without duplication. It is not serialized.
     #[serde(skip)]
     pub current_action_deferred_start: usize,
     /// A nested costed mana source owns this parent until it completes. This
@@ -7345,6 +7359,132 @@ pub struct ReplacementCandidateSummary {
     pub source_id: ObjectId,
     pub source_name: String,
     pub description: String,
+}
+
+/// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
+/// for a single raw event batch, produced before any live occurrence is claimed.
+///
+/// Generic and phase processing consume this immediately; the triggered-mana
+/// continuation may instead persist it undispatched across a pause, so a later
+/// action partitions already-materialized contexts rather than rematching raw
+/// events. It deliberately carries no live action ordinal: occurrence identities
+/// are only meaningful against the reducer event vector of the action that
+/// claimed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CollectedTriggerContextBatch {
+    /// The combined normal and delayed contexts in APNAP rank/timestamp order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<crate::game::triggers::PendingTriggerContext>,
+    /// The raw logical delayed batch, stored exactly once for durable replay and
+    /// accounting. Immediate consumers drop it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_events: Vec<GameEvent>,
+    /// Raw identities consumed by the delayed matcher for this batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_consumed: Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,
+    /// Whether the caller's already-observed normal seed was non-empty. The
+    /// closing processors clear post-collection transients only in that case.
+    #[serde(default)]
+    pub normal_was_non_empty: bool,
+}
+
+/// CR 605.3b + CR 608.2d: The activated mana ability's own colour prompt,
+/// latched exactly as the mana frame had already built it before the
+/// triggered-mana fixed point suspended that frame.
+///
+/// This wait belongs to the outer activated mana ability, never to an accepted
+/// triggered-mana body: the fixed point reconstructs it verbatim rather than
+/// re-deriving an option set against a board the accepted triggers may have
+/// changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManaColorChoiceResume {
+    pub player: PlayerId,
+    pub choice: ManaChoicePrompt,
+    pub context: ManaChoiceContext,
+}
+
+/// CR 605.4a: What resumes once every accepted triggered-mana occurrence in one
+/// completed mana frame has reached a terminal disposition.
+///
+/// Exactly one of the three shapes a completed frame can own. `Parent` is a
+/// nested child returning to its suspended cursor; `Root` is the completed root
+/// frame's own resume root; `ColorChoice` is the already-built prompt above.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub(crate) enum ManaTriggerFixedPointResume {
+    /// A nested child frame: its suspended parent cursor is the authority and
+    /// no wait is reconstructed here.
+    Parent,
+    /// The completed root mana frame's own activation resume root, together
+    /// with the mana source's controller — `resume_mana_ability_root`'s own
+    /// first argument, which its catch-all arm needs to rebuild the waiting
+    /// state. It travels with the root because a resumed accepted occurrence
+    /// no longer has the payment cursor that supplied it.
+    Root {
+        player: PlayerId,
+        resume: Box<ManaAbilityResume>,
+    },
+    /// The root frame's already-built `ChooseManaColor` wait.
+    ColorChoice(Box<ManaColorChoiceResume>),
+}
+
+/// CR 605.4a: Which existing interaction the current accepted triggered-mana
+/// occurrence is paused on. Private control state, never a wire discriminator:
+/// the public interaction surface is the ordinary `WaitingFor` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum TriggeredManaStage {
+    /// CR 700.2e: the controller is choosing which other player picks modes.
+    ChoosingModalChooser,
+    /// The chosen player is selecting modes.
+    ChoosingModes,
+    /// The selected body is executing and paused on one whitelisted
+    /// optional / optional-for / repeat / replacement interaction.
+    ResolvingBody,
+}
+
+/// CR 605.4a + CR 603.12a: The authoritative continuation for a classifier-
+/// accepted triggered mana ability that paused mid-resolution.
+///
+/// It owns only "after this immediate trigger finishes under this exact
+/// rules-execution node, partition these already-collected emission batches,
+/// then run this accepted tail, then resume this exact mana frame". Every inner
+/// operation (resolution frames, optional/repeat frames, pending replacement or
+/// cost-move state, and `waiting_for` itself) keeps its existing owner.
+///
+/// This carrier is trusted persistence authority: it can hold hidden object
+/// identities, last-known source snapshots, controller-only event batches, and
+/// the current rules-execution node. It is redacted from every client
+/// projection by `visibility.rs` and `derived_views.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TriggeredManaResume {
+    /// The complete accepted work item currently executing.
+    pub current: Box<crate::game::triggers::PendingTriggerContext>,
+    /// The occurrence-local production override captured by the auto-tap
+    /// planner for this exact `TapsForMana` occurrence, if any. The transient
+    /// override map is cleared before an interactive trigger can resume, so it
+    /// must travel with the occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_override: Option<ProductionOverride>,
+    /// CR 605.4a: The one `RulesExecutionNodeKind::TriggeredMana` node for this
+    /// occurrence. Required, not optional: every classifier-accepted context
+    /// yields exactly one source incarnation, and every pause of this
+    /// occurrence rebinds this exact ref.
+    pub rules_execution_node: RulesExecutionNodeRef,
+    /// Accepted work that has not been made current yet, in collection order.
+    /// Tail members deliberately have no node until they become current.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_tail: Vec<crate::game::triggers::PendingTriggerContext>,
+    /// Already-collected, still-undispatched emission batches produced by the
+    /// current occurrence across its pauses. Stored before the live occurrences
+    /// were claimed, so a later action partitions materialized contexts instead
+    /// of rematching raw events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collected_batches: Vec<CollectedTriggerContextBatch>,
+    /// The suspended mana frame this fixed point resumes exactly once.
+    pub outer_resume: ManaTriggerFixedPointResume,
+    /// Which existing interaction owns the current pause.
+    pub stage: TriggeredManaStage,
 }
 
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
@@ -15909,6 +16049,55 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_deferred_life_cost_resume: Option<DeferredLifeCostResume>,
 
+    /// CR 605.4a + CR 603.12a: Typed continuation for a classifier-accepted
+    /// triggered mana ability that paused mid-resolution. It stays serialized
+    /// with the matching whitelisted prompt so a host checkpoint resumes the
+    /// same stackless occurrence under the same rules-execution node.
+    /// Redacted from every client projection (`visibility.rs`,
+    /// `derived_views.rs`); the projected `WaitingFor` is the complete public
+    /// interaction surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_triggered_mana_resume: Option<Box<TriggeredManaResume>>,
+
+    /// CR 117.3c + CR 117.5 + CR 605.4a: The player who must receive priority
+    /// once a settled-Priority trigger batch finishes announcing, when that
+    /// player is not the active player. Installed only by the settled-Priority
+    /// convergence wrapper from its own exhaustively validated
+    /// `WaitingFor::Priority { player }`, retained across every
+    /// trigger-construction prompt, and consumed by the construction finisher
+    /// once the whole construction/deferred tail is exhausted.
+    ///
+    /// Deliberately **not** part of `resolution_completion_can_settle`: that
+    /// predicate gates `can_drain_deferred_triggers`, so a carrier inside it
+    /// would reject the very drains this batch depends on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_trigger_construction_priority_recipient: Option<PlayerId>,
+
+    /// CR 605.1b + CR 605.4a: The exact rules-execution node of the accepted
+    /// triggered-mana occurrence whose stackless body is currently executing or
+    /// resuming. Presence means the complete classifier accepted the original
+    /// graph, so a resolver-time context-ref injection into `targets` cannot
+    /// reopen classification (CR 605.4a).
+    ///
+    /// Transient by construction: it is a lexical scope marker equal to
+    /// `active_rules_execution_node` while live, and every sidecar-owned action
+    /// reinstalls it from `TriggeredManaResume::rules_execution_node`. Serde
+    /// persists the sidecar and its node, never this marker.
+    #[serde(skip)]
+    pub(crate) active_accepted_triggered_mana_node: Option<RulesExecutionNodeRef>,
+
+    /// Debug-only witness that the trigger-construction finisher ran at most
+    /// once per reducer action. The finisher is applied at the outermost handler
+    /// return of each of its enumerated action seams; a second call in the same
+    /// action would mean a seam was added below dispatch, where a `Priority`
+    /// result is discarded and the recipient would be lost mid-batch.
+    ///
+    /// Transient by construction — `apply_action_boundary_core` clears it at
+    /// action entry beside the other per-action transients — so it is never
+    /// serialized and never part of state equality.
+    #[serde(skip)]
+    pub(crate) trigger_construction_finisher_ran_this_action: bool,
+
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
@@ -19844,6 +20033,10 @@ impl GameState {
             current_triggered_mana_override: None,
             pending_cost_move_resume: None,
             pending_deferred_life_cost_resume: None,
+            pending_triggered_mana_resume: None,
+            pending_trigger_construction_priority_recipient: None,
+            active_accepted_triggered_mana_node: None,
+            trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -21543,6 +21736,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         current_triggered_mana_override: _,
         pending_cost_move_resume: _,
         pending_deferred_life_cost_resume: _,
+        pending_triggered_mana_resume: _,
+        pending_trigger_construction_priority_recipient: _,
+        active_accepted_triggered_mana_node: _,
+        trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         ring_level: _,
@@ -21792,6 +21989,9 @@ impl PartialEq for GameState {
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_cost_move_resume == other.pending_cost_move_resume
+            && self.pending_triggered_mana_resume == other.pending_triggered_mana_resume
+            && self.pending_trigger_construction_priority_recipient
+                == other.pending_trigger_construction_priority_recipient
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields

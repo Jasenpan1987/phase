@@ -214,8 +214,15 @@ fn ancient_brass_dragon_zero_targets_is_clean_no_op() {
         .act(GameAction::SelectTargets { targets: vec![] })
         .expect("selecting zero targets must be a clean no-op");
 
+    // CR 603.12 + CR 603.3b: the reflexive is its own stack object, so let it
+    // RESOLVE and then STOP. Passing priority into an already-empty stack
+    // advances phases instead, and by turn 3 P1 is decked — elimination exiles
+    // every card that player owned, including the graveyard cards this row
+    // measures. The observation point for "clean no-op" is the first settled
+    // empty stack, not an unbounded pass loop.
     for _ in 0..30 {
         match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
                 if runner.act(GameAction::PassPriority).is_err() {
                     break;

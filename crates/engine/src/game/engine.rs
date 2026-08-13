@@ -6867,6 +6867,11 @@ fn apply_action(
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
     let skip_deferred_trigger_drain = false;
+    // The trigger-construction finisher runs at most once per reducer action, at
+    // the outermost handler return of its enumerated seams. Reset the witness
+    // here rather than at the outer boundary so a direct `apply_action` caller
+    // (drive loops, injector harnesses) is measured per action too.
+    state.trigger_construction_finisher_ran_this_action = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -8476,6 +8481,17 @@ fn apply_action(
             },
         ) => {
             let events_before = events.len();
+            // CR 605.4a: which typed half of the colour seam this action is.
+            // A `ManaAbility` choice is a completed mana frame and has already
+            // recorded its exact occurrences through
+            // `mana_abilities::collect_completed_mana_frame_events` (the
+            // original source in `handle_choose_mana_color`, each sibling on its
+            // own finish path). A `ResolvingEffect` choice is not a mana frame
+            // at all and keeps its historical immediate scan.
+            let is_completed_mana_frame = matches!(
+                context,
+                crate::types::game_state::ManaChoiceContext::ManaAbility(_)
+            );
             let wf = match context {
                 crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
                     // CR 605.3a: validate the requested batch size BEFORE any mana
@@ -8543,15 +8559,22 @@ fn apply_action(
                     )?
                 }
             };
-            // CR 603.2c + CR 605.4a: A mana color choice produces mana inline.
-            // Scan its events for TapsForMana mana multipliers and for
-            // cost-payment triggers HERE, because for `ManaPayment` /
-            // `UnlessPayment` resumes the post-action pipeline is skipped
-            // (it is guarded by `matches!(waiting_for, WaitingFor::Priority)`),
-            // so this is the only scan site — and CR 605.4a requires the bonus
-            // mana to enter the pool before the spell's payment step continues.
-            // Do NOT "simplify" this scan away for non-Priority resumes.
-            if events.len() > events_before {
+            // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
+            // produces mana inline. Scan its events for TapsForMana mana
+            // multipliers and for cost-payment triggers HERE, because for
+            // `ManaPayment` / `UnlessPayment` resumes the post-action pipeline is
+            // skipped (it is guarded by `matches!(waiting_for,
+            // WaitingFor::Priority)`), so this is the only scan site — and
+            // CR 605.4a requires the bonus mana to enter the pool before the
+            // spell's payment step continues. Do NOT "simplify" this scan away
+            // for non-Priority resumes.
+            //
+            // The `ManaAbility` half owns no aggregate scan: every source and
+            // sibling already recorded exact occurrences through the typed
+            // completed-frame seam, so a second scan here would rediscover
+            // events the frame already claimed and dispatch an ordinary cost
+            // observer separately from that frame's synthetic reflexive.
+            if !is_completed_mana_frame && events.len() > events_before {
                 let mana_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &mana_events);
             }
@@ -8576,7 +8599,12 @@ fn apply_action(
             // Claim the scan via `triggers_processed_inline` — the same
             // mechanism `DeclareAttackers` uses — so the pipeline runs SBAs,
             // delayed/state triggers, and layers but skips the trigger re-scan.
-            if matches!(wf, WaitingFor::Priority { .. }) {
+            //
+            // The `ManaAbility` half must NOT use this broad suppression: its
+            // occurrence journal already narrows the pipeline's scan to exactly
+            // the events the mana frames did not claim, and the pipeline's
+            // guarded deferred drain is what releases their queued contexts once.
+            if !is_completed_mana_frame && matches!(wf, WaitingFor::Priority { .. }) {
                 triggers_processed_inline = true;
             }
             wf
@@ -9352,7 +9380,6 @@ fn apply_action(
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
-                let events_before = events.len();
                 let ability_def = obj.abilities[ability_index].clone();
                 let wf = mana_abilities::activate_mana_ability(
                     state,
@@ -9367,18 +9394,14 @@ fn apply_action(
                     },
                     None,
                 )?;
-                // CR 605.1b: Process TapsForMana triggers inline during mana payment
-                // (same rationale as the TapLandForMana arm below).
-                // CR 605.3b + CR 616.1 + CR 603.3b: A paused costed mana
-                // ability serializes its unscanned events in its typed cursor.
-                // The cursor is their single settlement authority, so do not
-                // scan them here and again when the replacement choice resumes.
-                if events.len() > events_before
-                    && !casting::mana_ability_cost_payment_is_paused(state)
-                {
-                    let mana_events: Vec<_> = events[events_before..].to_vec();
-                    super::triggers::process_triggers(state, &mana_events);
-                }
+                // CR 605.1b + CR 605.4a: no outer scan. `activate_mana_ability`
+                // builds a real typed cursor here, and its completed frame has
+                // already run `collect_completed_mana_frame_events` — collecting
+                // TapsForMana multipliers and ordinary cost observers together
+                // and journaling the exact live occurrences it claimed. Rescanning
+                // the same range would rediscover them. A paused costed mana
+                // ability keeps owning its unscanned events in that cursor, and
+                // still settles them when the replacement choice resumes.
                 if let Some(order_wf) =
                     super::triggers::preserve_order_triggers_resume(state, wf.clone())
                 {
@@ -9414,21 +9437,39 @@ fn apply_action(
                 },
                 &mut events,
             )?;
-            super::triggers::resolve_tap_mana_triggers_inline(
-                state,
-                &mut events,
-                events_before,
-            );
-            // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
-            // Fertile Ground, Mana Flare class) must resolve inline when mana is
-            // produced during cost payment. The ManaPayment path does not flow through
-            // run_post_action_pipeline, so process triggers explicitly here so the
-            // bonus mana reaches the pool before the payment check.
-            if events.len() > events_before
-                && !casting::mana_ability_cost_payment_is_paused(state)
-            {
-                let mana_events: Vec<_> = events[events_before..].to_vec();
-                super::triggers::process_triggers(state, &mana_events);
+            // CR 605.1b + CR 605.4a: the manual land tap has no cursor wrapper
+            // of its own — `activate_mana_source_option`'s no-ability branch
+            // taps and produces directly — so this arm IS its completed mana
+            // frame and runs the same typed empty-ledger preparation the cursor
+            // path runs internally. It resolves the TapsForMana triggered mana
+            // abilities inline (Wild Growth, Vorinclex, Fertile Ground, Mana
+            // Flare class) so the bonus mana reaches the pool before the payment
+            // check, and collects the ordinary tap observers into the same
+            // release group instead of dispatching them separately. The
+            // `ManaPayment` path does not flow through
+            // `run_post_action_pipeline`, so this remains the only seam. Frames
+            // whose ability branch already collected are protected by the
+            // helper's own consumed-occurrence filter.
+            if !casting::mana_ability_cost_payment_is_paused(state) {
+                if let Some(pause) = mana_abilities::collect_completed_mana_frame_events(
+                    state,
+                    Vec::new(),
+                    &mut events,
+                    events_before,
+                    crate::types::game_state::ManaTriggerFixedPointResume::Root {
+                        player: *player,
+                        resume: Box::new(ManaAbilityResume::ManaPayment {
+                            outer_player: Some(*player),
+                            convoke_mode: *convoke_mode,
+                        }),
+                    },
+                ) {
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: pause,
+                        log_entries: vec![],
+                    });
+                }
             }
             if let Some(order_wf) =
                 super::triggers::preserve_order_triggers_resume(state, wf.clone())
@@ -9864,7 +9905,12 @@ fn apply_action(
         // `actor` is already authorized as the prompted player by
         // `check_actor_authorization` (via `WaitingFor::acting_player`).
         (WaitingFor::OrderTriggers { .. }, GameAction::OrderTriggers { order }) => {
-            triggers::handle_order_triggers(state, order)?
+            // Round-20 seam 1: this arm is the outermost handler return for the
+            // whole ordered batch, so it is where the construction finisher runs
+            // — covering the multi-group re-prompt, both early returns after
+            // `pending_trigger_order.take()`, and the terminal resume.
+            let produced = triggers::handle_order_triggers(state, order)?;
+            triggers::finish_trigger_construction_action(state, &mut events, produced)
         }
         // CR 707.9: Player chose a permanent to copy for "enter as a copy of" replacement.
         (
@@ -11300,7 +11346,10 @@ fn apply_action(
                 // `pending_trigger_entry` so the resolver may now fire it.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
+                let produced = if !triggers::finalize_pending_trigger_entry(
+                    state,
+                    &pending_trigger.ability,
+                ) {
                     // Unexpected dangling cursor: the entry is no longer on the
                     // stack. Recover per CR 608.2b / CR 800.4a (a stack object
                     // that has left the stack does not resolve) — record the
@@ -11326,7 +11375,13 @@ fn apply_action(
                     } else {
                         WaitingFor::Priority { player: p }
                     }
-                }
+                };
+                // Round-20 seam 4: the trigger-owned division arm's produced
+                // wait — dangling recovery, deferred sibling, or success — goes
+                // through the construction finisher exactly once. The
+                // resolution-time and cast-time distribution arms below are not
+                // trigger-owned and are deliberately untouched.
+                triggers::finish_trigger_construction_action(state, &mut events, produced)
             } else {
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
@@ -15997,19 +16052,39 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            37,
+            40,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one): adjudicate it in this doc and \
              name the site, do not merely move the number.\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
+        // TEST-FIXTURE DRIFT, adjudicated on THIS branch (plan-v23 Step 5, session 4),
+        // `27 ⇒ 28`. One new line, again in the third (benign) partition:
+        // `game/triggers.rs::approved_construction_prompts` — the fixture that enumerates one
+        // instance of each of the six approved trigger-construction prompts, which the
+        // construction-finisher contract rows iterate. It mints nothing in production and
+        // reads `state.waiting_for` nowhere. The PRODUCER half is unchanged at 5 and the
+        // READER half unchanged at 7, both with byte-identical per-file lists.
+        // TEST-FIXTURE DRIFT, adjudicated on THIS branch (plan-v23 Steps 6/7), `25 ⇒ 27`.
+        // Both new lines are `#[cfg(test)]` fixture waits, i.e. the third partition — the
+        // benign class. The PRODUCER half is unchanged at 5 with a byte-identical per-file
+        // list, and the READER half is unchanged at 7, which is what this row's claim is
+        // about. The two lines are:
+        //   - `game/triggers.rs::observer_helper_fixture` — the paused wait the
+        //     `park_observer_triggers_if_paused` rows need in order to reach that helper's
+        //     collecting branch at all;
+        //   - `game/visibility.rs::triggered_mana_projection_fixture` — the live public
+        //     prompt the Step-6 redaction rows assert survives viewer filtering.
+        // Neither mints a prompt in production; neither reads `state.waiting_for` in
+        // production. Adjudicated, not relaxed: a sixth PRODUCER would still red the
+        // partition assert below before this total could absorb it.
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 7, 25),
+            (5, 7, 28),
             "the partition, not just the total: five PRODUCTION producers, seven PRODUCTION \
              readers (they read `state.waiting_for` and never write it — the seventh is U4's \
-             `inject_pinned_answer` arm), 25 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             `inject_pinned_answer` arm), 28 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
@@ -16106,9 +16181,20 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                "game/effects/mod.rs:6306".to_string(),
-                "game/effects/mod.rs:6383".to_string(),
-                "game/effects/mod.rs:9578".to_string(),
+                // THIS BRANCH (reflexive materializer), REBASED ONTO `117b430c2`:
+                // `:6306/:6383/:9578 ⇒ :6429/:6506/:9701`, uniform +123 above all three.
+                // Cause is LOCAL — `build_reflexive_pending_trigger` plus the deferral arms
+                // inside `try_materialize_reflexive_trigger`, all of which sit above `:6306`
+                // in `game/effects/mod.rs` — so the CI-vs-local diagnosis in the header does
+                // not apply. Coordinates re-derived from this row's OWN failure output at the
+                // rebased tip, not carried over from either side of the rebase conflict.
+                // Identity re-established rather than assumed: each producer at its new
+                // coordinate is byte-identical to `117b430c2:game/effects/mod.rs` at its old
+                // one, and `scoped_library_search.rs:452` did not move at all — the
+                // set-preservation evidence that no producer was gained or lost.
+                "game/effects/mod.rs:6429".to_string(),
+                "game/effects/mod.rs:6506".to_string(),
+                "game/effects/mod.rs:9701".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16426,7 +16512,15 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:12004".to_string(),
+                //
+                // THIS BRANCH (reflexive materializer), REBASED ONTO `117b430c2`: `:12004 ⇒
+                // :12059`, +55. LOCAL, not upstream — this branch's own engine.rs insertions
+                // (the deferred-drain gate and the trigger-construction finisher witness)
+                // land above this producer. Coordinate re-derived from this row's own
+                // failure output at the rebased tip; the line at `:12059` is byte-identical
+                // to `117b430c2:engine.rs:12004` and still inside
+                // `begin_pending_trigger_target_selection`.
+                "game/engine.rs:12059".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

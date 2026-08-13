@@ -192,6 +192,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         forward_result: false,
         unless_pay: None,
         distribution: None,
+        distribute: None,
         target_selection_mode: TargetSelectionMode::Chosen,
         chosen_players: Vec::new(),
         repeat_until: None,

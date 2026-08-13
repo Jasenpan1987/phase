@@ -142,6 +142,9 @@ pub fn build_resolved_from_def_with_targets(
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
+    // CR 601.2d + CR 603.3d: Preserve the unassigned division unit until the
+    // ordinary stack-announcement authority assigns concrete portions.
+    resolved.distribute = def.distribute.clone();
     resolved.player_scope = def.player_scope.clone();
     // CR 101.4 + CR 800.4: Propagate the turn-order override for `player_scope`
     // iteration. The iteration driver in `effects/mod.rs` reads this and calls
@@ -168,7 +171,7 @@ pub fn build_resolved_from_def_with_targets(
     // keyword list collapses after the first false gate.
     resolved.sibling_condition = def.sibling_condition;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
-    // through so try_begin_reflexive_target_selection can route a gated modal
+    // through so try_materialize_reflexive_trigger can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
     // unconditionally.
     resolved.modal = def.modal.clone();
@@ -192,7 +195,8 @@ pub fn build_resolved_from_def_with_targets(
 /// Fields from `sub`: effect, duration, sub_ability, else_ability,
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
 /// target_constraints, target_choice_timing, description, repeat_for,
-/// min_x_value, forward_result, unless_pay, distribution, target_selection_mode.
+/// min_x_value, forward_result, unless_pay, distribution, distribute,
+/// target_selection_mode.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, chosen_x, cost_paid_object,
@@ -245,6 +249,7 @@ pub(crate) fn apply_instead_swap(
     overridden.forward_result = sub.forward_result;
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();
+    overridden.distribute = sub.distribute.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
     overridden.target_chooser = sub.target_chooser.clone();
     // CR 608.2b + CR 601.2c: a swapped-in effect with its own declared target
@@ -898,6 +903,35 @@ pub fn compute_unavailable_modes(
     unavailable.sort_unstable();
     unavailable.dedup();
     unavailable
+}
+
+/// CR 700.2a / CR 700.2e: every player the modal's `chooser` admits, in APNAP
+/// order.
+///
+/// `PlayerFilter::Controller` — every standard modal and the `you choose —`
+/// alias — is the controller alone, without consulting
+/// `effects::matches_player_scope`. Any other filter (CR 700.2e, "an opponent
+/// chooses …") is resolved through that canonical authority over APNAP order.
+///
+/// Spell announcement wants only the first admitted player, which is what
+/// `casting::resolve_modal_chooser` takes; trigger construction needs the whole
+/// set, because more than one non-controller candidate makes the controller's
+/// CR 700.2e chooser selection a real choice rather than a derivation.
+pub(crate) fn modal_chooser_candidates(
+    state: &GameState,
+    modal: &ModalChoice,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> Vec<PlayerId> {
+    if modal.chooser == PlayerFilter::Controller {
+        return vec![controller];
+    }
+    players::apnap_order(state)
+        .into_iter()
+        .filter(|&p| {
+            super::effects::matches_player_scope(state, p, &modal.chooser, controller, source_id)
+        })
+        .collect()
 }
 
 /// CR 700.2a-b: Mode indices a modal spell cannot choose — repeat constraints
@@ -7714,6 +7748,75 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
 
+    /// CR 700.2a / CR 700.2e: `modal_chooser_candidates` is the one authority
+    /// both spell announcement and trigger construction read.
+    ///
+    /// Announcement is single-valued and takes `.first()`, so this row proves
+    /// the head of the returned order is byte-identical to the historic
+    /// `resolve_modal_chooser` result on both branches, and that the tail — the
+    /// part only trigger construction consumes — really is the complete
+    /// admitted set rather than that same single value. A regression that
+    /// truncates the extraction back to one candidate fails the three-player
+    /// length assertion while leaving both head assertions green.
+    #[test]
+    fn modal_chooser_candidates_are_the_complete_admitted_set_in_apnap_order() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Modal chooser source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            ..Default::default()
+        };
+
+        // CR 700.2a: the controller branch never consults `matches_player_scope`
+        // and never admits anyone else, in any seat count.
+        modal.chooser = PlayerFilter::Controller;
+        assert_eq!(
+            modal_chooser_candidates(&state, &modal, PlayerId(1), source),
+            vec![PlayerId(1)],
+            "the controller branch is the controller alone"
+        );
+
+        // CR 700.2e: "an opponent chooses —" with two opponents is a real
+        // choice, and APNAP order decides which one announcement would take.
+        modal.chooser = PlayerFilter::Opponent;
+        let candidates = modal_chooser_candidates(&state, &modal, PlayerId(0), source);
+        assert_eq!(
+            candidates,
+            vec![PlayerId(1), PlayerId(2)],
+            "every opponent is admitted, in APNAP order"
+        );
+        assert_eq!(
+            candidates.first().copied(),
+            Some(PlayerId(1)),
+            "announcement's single-valued head is the first APNAP opponent"
+        );
+
+        // Two-player: the same authority collapses to the unambiguous opponent.
+        let mut two = GameState::new_two_player(42);
+        two.active_player = PlayerId(0);
+        let two_source = create_object(
+            &mut two,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Modal chooser source".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(
+            modal_chooser_candidates(&two, &modal, PlayerId(0), two_source),
+            vec![PlayerId(1)]
+        );
+    }
+
     /// Matrix rows 5 + 6 — the slot/spec mirror must agree in COUNT **and**
     /// ORDER, and the context-ref skip must agree between the two sites.
     ///
@@ -9090,6 +9193,7 @@ mod tests {
         sub.player_scope = Some(crate::types::ability::PlayerFilter::Opponent);
         sub.optional = true;
         sub.description = Some("override description".to_string());
+        sub.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
 
         let swapped = apply_instead_swap(&parent, &sub);
 
@@ -9105,6 +9209,11 @@ mod tests {
         );
         assert!(swapped.optional, "swap must preserve sub.optional");
         assert_eq!(swapped.description.as_deref(), Some("override description"));
+        assert_eq!(
+            swapped.distribute,
+            Some(crate::types::game_state::DistributionUnit::Damage),
+            "swap must preserve the sub-ability's unassigned distribution unit"
+        );
         // Identity / runtime-context fields come from parent.
         assert_eq!(
             swapped.controller,
@@ -9216,6 +9325,25 @@ mod tests {
             Some(crate::types::ability::PlayerFilter::Opponent),
             "player_scope must survive build_resolved_from_def — issue #310",
         );
+    }
+
+    #[test]
+    fn build_resolved_from_def_preserves_unassigned_distribution_unit() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        def.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+
+        let resolved = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+
+        assert_eq!(resolved.distribute, def.distribute);
+        assert!(resolved.distribution.is_none());
     }
 
     #[test]
