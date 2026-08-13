@@ -21,8 +21,8 @@ use crate::types::game_state::{
     GameState, LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
     LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin,
     ProductionOverride, StackEntry, StackEntryKind, SyntheticTriggerProvenance,
-    TargetSelectionConstraint, TargetSelectionSlot,
-    TriggerObservationTime, TriggerSourceContext, WaitingFor,
+    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,

@@ -20983,7 +20983,11 @@ impl GameState {
         // normalization keeps that a non-load-bearing coincidence rather than a
         // hidden precondition of CR 104.4b detection.
         if let Some(resume) = clone.pending_triggered_mana_resume.as_mut() {
-            resume.current.pending.ability.clear_trigger_identity_recursive();
+            resume
+                .current
+                .pending
+                .ability
+                .clear_trigger_identity_recursive();
             for ctx in resume.accepted_tail.iter_mut() {
                 ctx.pending.ability.clear_trigger_identity_recursive();
             }
@@ -20992,9 +20996,10 @@ impl GameState {
                     ctx.pending.ability.clear_trigger_identity_recursive();
                 }
             }
-            resume.rules_execution_node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
-                crate::types::resolved_commands::SettlementNodeOrdinal(0),
-            );
+            resume.rules_execution_node =
+                crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+                    crate::types::resolved_commands::SettlementNodeOrdinal(0),
+                );
         }
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.clear_trigger_identity_recursive();
