@@ -2307,8 +2307,6 @@ fn build_reflexive_pending_trigger(
         .description
         .clone()
         .or_else(|| parent.and_then(|parent| parent.description.clone()));
-    let timestamp = u32::try_from(state.next_timestamp()).unwrap_or(u32::MAX);
-
     crate::game::triggers::PendingTrigger {
         source_id,
         controller,
@@ -2324,7 +2322,10 @@ fn build_reflexive_pending_trigger(
         die_result: state.die_result_this_resolution,
         provenance: None,
         ability: Box::new(ability),
-        timestamp,
+        // CR 603.3b: reflexives from one collection share a turn key; the
+        // stable APNAP sort preserves their collection order without consuming
+        // the global timestamp allocator.
+        timestamp: state.turn_number,
     }
 }
 
@@ -13998,6 +13999,8 @@ mod tests {
     #[test]
     fn reflexive_constructor_preserves_unassigned_distribution_metadata() {
         let mut state = GameState::new_two_player(42);
+        state.turn_number = 7;
+        state.next_timestamp = 41;
         let mut reflexive = reflexive_counter_ability(ObjectId(100));
         reflexive.distribute = Some(crate::types::game_state::DistributionUnit::Counters(
             "+1/+1".to_string(),
@@ -14008,6 +14011,8 @@ mod tests {
         assert_eq!(pending.distribute, reflexive.distribute);
         assert_eq!(pending.ability.distribute, reflexive.distribute);
         assert!(pending.ability.condition.is_none());
+        assert_eq!(pending.timestamp, state.turn_number);
+        assert_eq!(state.next_timestamp, 41);
     }
 
     // CR 608.2h (#6486): Volcanic Vision — "Return target instant or sorcery card
