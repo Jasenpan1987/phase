@@ -18,9 +18,9 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
+    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
     ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -153,10 +153,10 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
-            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // CR 508.1d: MustAttackDefender carries the `PlayerId` that must be
             // attacked (Alluring Siren). Enforced by direct match in combat.rs
             // declare-attackers validation.
-            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustAttackDefender { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -549,6 +549,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Player => "player".into(),
         TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::SourceController => "source's controller".into(),
         TargetFilter::Opponent => "opponent".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
@@ -890,6 +891,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::EnchantedPlayer => "enchanted player's",
                     // CR 102.1: Display label for active-player controller scope.
                     ControllerRef::ActivePlayer => "the active player's",
+                    // CR 109.4 + CR 611.2: snapshotted controller scope.
+                    ControllerRef::SpecificPlayer { .. } => "that player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -1062,6 +1065,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::EnchantedPlayer => "enchanted player",
                 // CR 102.1: Display label for active-player controller scope.
                 ControllerRef::ActivePlayer => "the active player",
+                // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+                ControllerRef::SpecificPlayer { .. } => "that player",
             };
             parts.push(label.into());
         } else {
@@ -1137,6 +1142,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::EnchantedPlayer => "enchanted player controls",
         // CR 102.1: Display label for active-player controller scope.
         ControllerRef::ActivePlayer => "the active player controls",
+        // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+        ControllerRef::SpecificPlayer { .. } => "that player controls",
     }
     .into()
 }
@@ -1267,6 +1274,8 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
+        // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
+        PlayerScope::SpecificPlayer { .. } => "that player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1505,6 +1514,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
         QuantityRef::DistinctCardTypes { source } => match source {
+            // Preserved surface form: the zone reading renders "card types in
+            // <zone>", not "card types among cards in <zone>".
             CardTypeSetSource::Zone { zone, scope } => {
                 format!(
                     "card types in {} {}",
@@ -1512,26 +1523,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                     fmt_zone_ref(zone)
                 )
             }
-            CardTypeSetSource::ExiledBySource => "card types among cards exiled with source".into(),
-            CardTypeSetSource::Objects { filter } => {
-                format!("card types among {}", fmt_target(filter))
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::TurnJournal { .. }
+            | CardTypeSetSource::AnyOf { .. } => {
+                format!(
+                    "card types among {}",
+                    fmt_characteristic_population_bounded(source)
+                )
             }
-            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
-                Some(cause) => {
-                    use crate::types::ability::ThisWayCause;
-                    let verb = match cause {
-                        ThisWayCause::Discarded => "discarded",
-                        ThisWayCause::Exiled => "exiled",
-                        ThisWayCause::Milled => "milled",
-                        ThisWayCause::Destroyed => "destroyed",
-                        ThisWayCause::Sacrificed => "sacrificed",
-                        ThisWayCause::Returned => "returned",
-                        ThisWayCause::Bounced => "bounced",
-                    };
-                    format!("card types among cards {verb} this way")
-                }
-                None => "card types among tracked cards".into(),
-            },
         },
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
@@ -1540,14 +1541,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 }
                 crate::types::ability::SubtypeExclusion::None => "",
             };
-            let scope_desc = match source {
-                CardTypeSetSource::Zone { zone, scope } => {
-                    format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
-                }
-                CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
-                CardTypeSetSource::Objects { filter } => fmt_target(filter),
-                CardTypeSetSource::TrackedSet { .. } => "tracked cards".into(),
-            };
+            let scope_desc = fmt_characteristic_population_bounded(source);
             format!("subtypes{suffix} among {scope_desc}")
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
@@ -1584,8 +1578,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_controller(controller)
             )
         }
-        QuantityRef::DistinctColorsAmongPermanents { filter } => {
-            format!("# of colors among {}", fmt_target(filter))
+        QuantityRef::DistinctColorsAmong { source } => {
+            format!(
+                "# of colors among {}",
+                fmt_characteristic_population_bounded(source)
+            )
         }
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             format!("# of counter kinds among {}", fmt_target(filter))
@@ -1721,6 +1718,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
+        QuantityRef::PlayerChosenNumber { player } => {
+            format!("secretly chosen number ({})", fmt_player_scope(player))
+        }
         QuantityRef::AttackedThisTurn { .. } => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
@@ -2077,7 +2077,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
             }
         }
         ChoiceType::CardName => "card name",
-        ChoiceType::NumberRange { min, max, .. } => return format!("number ({min}-{max})"),
+        // CR 107.1a/b: an unbounded range has no ceiling to print.
+        ChoiceType::NumberRange { min, max, .. } => {
+            return match max {
+                Some(max) => format!("number ({min}-{max})"),
+                None => format!("number ({min} or greater)"),
+            }
+        }
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
         ChoiceType::CardPredicate { .. } => "card predicate",
@@ -2253,6 +2259,71 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
     }
 }
 
+/// CR 109.2 + CR 400.1 + CR 601.2a: Human-readable rendering of the population a
+/// [`CardTypeSetSource`] names, shared by every distinct-characteristic count
+/// (card types CR 205.2, subtypes CR 205.3, colors CR 105.1) so a new population
+/// renders once rather than in three drifting copies.
+fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
+    match source {
+        CardTypeSetSource::Zone { zone, scope } => {
+            format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
+        }
+        CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
+        CardTypeSetSource::Objects { filter } => fmt_target(filter),
+        CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+            Some(cause) => {
+                use crate::types::ability::ThisWayCause;
+                let verb = match cause {
+                    ThisWayCause::Discarded => "discarded",
+                    ThisWayCause::Exiled => "exiled",
+                    ThisWayCause::Milled => "milled",
+                    ThisWayCause::Destroyed => "destroyed",
+                    ThisWayCause::Sacrificed => "sacrificed",
+                    ThisWayCause::Returned => "returned",
+                    ThisWayCause::Bounced => "bounced",
+                };
+                format!("cards {verb} this way")
+            }
+            None => "tracked cards".into(),
+        },
+        // CR 601.2a: the per-turn cast journal, not a live board census.
+        CardTypeSetSource::TurnJournal {
+            journal,
+            scope,
+            filter,
+        } => {
+            let base = match journal {
+                crate::types::ability::TurnJournalKind::SpellsCast => {
+                    format!("spells {} cast this turn", fmt_count_scope(scope))
+                }
+            };
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
+            }
+        }
+        // CR 109.2: a set union renders as its members joined by "and", mirroring
+        // the Oracle surface form ("permanents you control and spells you've cast
+        // this turn").
+        // Rendered by the bounded walker in the caller, which flattens nested
+        // unions — set union is associative, so "A and B and C" is the same
+        // population however the tree was built, and matches the Oracle surface
+        // form more closely than a parenthesized nesting would.
+        CardTypeSetSource::AnyOf { .. } => String::new(),
+    }
+}
+
+/// Display form for a whole population, unions flattened through the single
+/// bounded walker. Display-only: a truncated walk renders fewer members, which
+/// is a cosmetic loss in a coverage report rather than a correctness one.
+fn fmt_characteristic_population_bounded(source: &CardTypeSetSource) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+        parts.push(fmt_characteristic_population(leaf))
+    });
+    parts.join(" and ")
+}
+
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
@@ -2426,7 +2497,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceAttack { target, .. }
         // CR 701.27a: single-scope Transform reports its `target` like other
         // single-target effects; mass Transform (scope:All) reports a `filter` below.
         | Effect::Transform {
@@ -2451,6 +2521,33 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(attacker) = attacker {
                 d.push(("attacker".into(), format!("{attacker:?}")));
             }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
+        }
+        // CR 508.1d + CR 506.3: ForceAttack reports the SUBJECT under the key its
+        // scope earns — `target` for a chosen creature (CR 115.1), `filter` for a
+        // non-targeting population (Gideon Jura's "creatures that player
+        // controls") — plus the REQUIRED DEFENDER, which is the axis that
+        // distinguishes an attack pointed at a player from one pointed at a
+        // planeswalker. Without the defender in the signature those two collapse
+        // to one entry and the coverage/parse-diff artifact cannot tell a
+        // Gideon-Jura-class card from an Alluring-Siren-class one.
+        //
+        // Modelled on the `ForceBlock` arm above, including its non-default
+        // duration rule.
+        Effect::ForceAttack {
+            target,
+            required_defender,
+            duration,
+            scope,
+        } => {
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
+            d.push(("defender".into(), fmt_target(required_defender)));
             if *duration != Duration::UntilEndOfTurn {
                 d.push(("duration".into(), format!("{duration:?}")));
             }
@@ -2802,6 +2899,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile,
             library_position,
@@ -2820,6 +2918,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(enter_tapped, EtbTapState::Unspecified) {
                 d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
             }
             if !enter_with_counters.is_empty() {
                 d.push((
@@ -2942,6 +3043,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::SwapChosenLabels { first, second } => {
             d.push(("swap".into(), format!("{first} <-> {second}")));
+        }
+        Effect::RevealChosenNumbers { players } => {
+            d.push(("reveal chosen numbers".into(), format!("{players:?}")));
         }
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
@@ -3696,7 +3800,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Unimplemented { .. }
         | Effect::Explore
         | Effect::Investigate
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -3907,6 +4011,23 @@ fn fmt_comparator(c: &Comparator) -> &'static str {
     }
 }
 
+/// CR 903.3 vs CR 903.3d: the single label authority for a commander-control
+/// gate, shared by ALL FOUR condition-vocabulary formatters
+/// (`AbilityCondition`, `TriggerCondition`, `StaticCondition`, and any future
+/// mirror).
+///
+/// The two arms are DIFFERENT predicates — CR 903.3 + CR 109.5 "your commander"
+/// is owned AND controlled, CR 903.3d "a commander" is controlled by any owner —
+/// so they must never share a label. Collapsing them prints a strictly weaker
+/// predicate than the card, and the parse-details / Alt-hover overlay is what
+/// bug triage reads. Centralized here so one mirror cannot drift from another.
+fn fmt_commander_ownership(ownership: &CommanderOwnership) -> &'static str {
+    match ownership {
+        CommanderOwnership::Own => "you control your commander",
+        CommanderOwnership::Any => "you control a commander",
+    }
+}
+
 /// Format an `AbilityCondition` as a human-readable string for the parse-details overlay.
 fn fmt_ability_condition(cond: &AbilityCondition) -> String {
     match cond {
@@ -3971,6 +4092,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::ControlsCommander { ownership } => {
+            fmt_commander_ownership(ownership).into()
+        }
         AbilityCondition::CompletedDungeon { specific } => match specific {
             None => "you've completed a dungeon".into(),
             Some(dungeon) => format!("you've completed {dungeon}"),
@@ -4119,7 +4243,13 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             fmt_quantity(rhs)
         ),
         TC::HasMaxSpeed => "has max speed".into(),
-        TC::IsMonarch => "is monarch".into(),
+        // CR 725.1 + CR 109.5: keep the controller-scoped description byte-stable
+        // so existing gap strings do not churn; a scoped subject reads
+        // differently and gets its own phrase.
+        TC::IsMonarch {
+            player: PlayerScope::Controller,
+        } => "is monarch".into(),
+        TC::IsMonarch { .. } => "that player is monarch".into(),
         TC::IsInitiative => "has the initiative".into(),
         TC::NoMonarch => "no monarch".into(),
         TC::WasStartingPlayer { .. } => "was the starting player".into(),
@@ -4150,7 +4280,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ManaSpentCondition { .. } => "mana spent condition".into(),
         TC::HadCounters { .. } => "had counters".into(),
-        TC::ControlsCommander { .. } => "you control a commander".into(),
+        TC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         TC::IsRenowned { .. } => "is renowned".into(),
         TC::HasCounters {
             minimum, maximum, ..
@@ -4310,7 +4440,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsAttacking => "source is attacking".into(),
         SC::SourceIsBlocking => "source is blocking".into(),
         SC::SourceIsBlocked => "source is blocked".into(),
-        SC::IsMonarch => "is monarch".into(),
+        // CR 725.1 + CR 109.5: see the `TC::IsMonarch` arm above.
+        SC::IsMonarch {
+            player: PlayerScope::Controller,
+        } => "is monarch".into(),
+        SC::IsMonarch { .. } => "that player is monarch".into(),
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
@@ -4337,7 +4471,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         },
         SC::IsRingBearer => "is the ring-bearer".into(),
         SC::RingLevelAtLeast { level } => format!("ring level ≥ {level}"),
-        SC::ControlsCommander { .. } => "you control a commander".into(),
+        SC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         SC::SourceIsTapped => "source is tapped".into(),
         SC::IsTapped { .. } => "is tapped".into(),
         SC::SourceIsSaddled => "source is saddled".into(),
@@ -6450,7 +6584,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -6511,6 +6645,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -6992,6 +7127,7 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
         if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
+
         // Draft-time "draft matters" lines (CR 905) are consumed as no-ops by
         // the parser, so they produce no parse item — don't count them as
         // effective Oracle lines either, or the silent-drop guard would flag
@@ -7640,8 +7776,21 @@ fn extract_static_condition_features(
                 extract_static_condition_features(sub, features);
             }
         }
+        // `Not` is a boolean COMBINATOR exactly like `And` / `Or` —
+        // `layers::evaluate_condition` negates its operand's own evaluation and
+        // has no independent semantics of its own. Letting it fall into the
+        // catch-all below emitted only `static_condition:Not` (classified
+        // `Handled`, correctly, because negation itself is implemented) and
+        // SWALLOWED the operand, so an unhandled leaf under a negation was
+        // reported as supported. That is a fail-open in the direction coverage
+        // must never fail: `Not(IsMonarch { ScopedPlayer })` — the "unless that
+        // player is the monarch" shape the `layers` entry gate hard-rejects to
+        // `false` — would advertise a restriction that silently never applies.
+        StaticCondition::Not { condition } => {
+            extract_static_condition_features(condition, features);
+        }
         _ => {
-            // All other variants (including `Not`) emit a single tag. The
+            // Every remaining variant is a LEAF and emits a single tag. The
             // classifier carries compiler-enforced handled/unhandled status.
             let (name, support) = static_condition_feature(cond);
             features.insert(format!("static_condition:{name}"), support);
@@ -7846,6 +7995,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 903.3d: evaluated at resolution via `game::commander`.
+        AbilityCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
@@ -8073,9 +8224,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
-        QuantityRef::DistinctColorsAmongPermanents { .. } => {
-            ("DistinctColorsAmongPermanents", Handled)
-        }
+        QuantityRef::DistinctColorsAmong { .. } => ("DistinctColorsAmong", Handled),
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
@@ -8125,6 +8274,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // strict-failure marker anywhere, so it is genuinely handled.
         QuantityRef::TurnsTaken => ("TurnsTaken", Handled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
+        // CR 101.4 + CR 608.2d: resolved live in `quantity::resolve_quantity`
+        // over `Player::chosen_attributes` (per-candidate and aggregate scopes).
+        QuantityRef::PlayerChosenNumber { .. } => ("PlayerChosenNumber", Handled),
         QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
@@ -8250,9 +8402,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // Variants below are parsed but not classified as handled by the prior registry.
         StaticCondition::HasMaxSpeed => ("HasMaxSpeed", Unhandled),
         StaticCondition::SpeedGE { .. } => ("SpeedGE", Unhandled),
-        // CR 608.2c: Compound conditions — resolved recursively by
+        // Compound conditions — resolved recursively by
         // `layers::evaluate_condition`, which short-circuits And/Or and
         // negates Not. Verified at layers.rs ~line 263.
+        //
+        // All three arms are UNREACHABLE from `extract_static_condition_features`:
+        // that walker recurses every combinator and only classifies leaves, so a
+        // combinator never contributes a tag of its own. They exist for
+        // exhaustiveness and for the direct unit-test callers below.
         StaticCondition::And { .. } => ("And", Handled),
         StaticCondition::Or { .. } => ("Or", Handled),
         StaticCondition::Not { .. } => ("Not", Handled),
@@ -8263,7 +8420,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Handled),
         StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Handled),
         StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Handled),
-        StaticCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 725.1: only the controller subject has a static-side evaluator.
+        // `layers::evaluate_condition{,_with_recipient}` rejects every other
+        // scope at its entry boundary (no trigger event, no combat anchor), so
+        // coverage must report those `Unhandled` rather than claim support.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        } => ("IsMonarch", Handled),
+        StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
@@ -8281,6 +8445,27 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::AnyPlayerAttackedYouLastTurn => ("AnyPlayerAttackedYouLastTurn", Handled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
+        // CR 903.3d: the RUNTIME does evaluate this static
+        // (`layers::evaluate_static_condition`, layers.rs:1875, delegating both
+        // ownership arms to the single `game::commander` authority), so the
+        // `Unhandled` tag below understates the resolver.
+        //
+        // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
+        // an unrelated change: the tag is currently the only thing holding two
+        // demonstrably MISPARSED Lieutenant cards out of the supported set. Of the
+        // seven `ControlsCommander` statics in the pool, Convergence of Dominion
+        // parses to a static with `modifications: []` (a no-op continuous effect)
+        // and Thunderfoot Baloth collapses "this creature gets +2/+2 and other
+        // creatures you control get +2/+2 and have trample" into ONE `SelfRef`
+        // static, dropping the "other creatures you control" clause and granting
+        // trample to the Baloth itself. Flipping the tag alone would advertise both
+        // as `supported: true, gap_count: 0`.
+        //
+        // Land the flip in its own change, AFTER an empty-`modifications` static
+        // and a dropped continuous-modification clause each register as real gaps.
+        // Nothing in the commander-gate work depends on this tag — Fight for the
+        // Throne's intervening-`if` is an `AbilityCondition`, classified `Handled`
+        // in `condition_feature` above.
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         // SourceIsEquipped resolved by layers::evaluate_condition (layers.rs:1057)
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
@@ -9221,6 +9406,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // legitimately produce no `ParsedElement`. Skip them so they are not
         // falsely reported as `SilentDrop`.
         if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
+        // CR 905.1a + CR 905.2: Draft-procedure lines are handled by the
+        // Draft engine, not by constructed-game card abilities.
+        if is_draft_matters_sentence(stripped) {
             continue;
         }
 
@@ -12225,6 +12416,128 @@ mod tests {
         assert!(missing.is_empty());
     }
 
+    /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
+    /// deliberate mask, not an oversight — this pins both halves so the flip
+    /// cannot be smuggled in as a rider on an unrelated change.
+    ///
+    /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
+    /// (`layers::evaluate_static_condition`, layers.rs:1875), so on the
+    /// resolver axis alone the tag understates the engine. But the tag is also
+    /// the only thing keeping two demonstrably misparsed Lieutenant cards out
+    /// of the supported set, so it must stay until those misparses register as
+    /// real gaps.
+    ///
+    /// The second assertion is the evidence, on verbatim Oracle text: Thunderfoot
+    /// Baloth's "…this creature gets +2/+2 AND OTHER CREATURES YOU CONTROL get
+    /// +2/+2 and have trample" collapses into a single `SelfRef` static, so the
+    /// other-creatures clause is silently dropped and trample lands on the Baloth
+    /// itself — with no gap recorded anywhere.
+    ///
+    /// FLIP PROTOCOL: when the dropped-clause misparse (and Convergence of
+    /// Dominion's empty-`modifications` no-op static) each register as a gap, the
+    /// second assertion here goes red. THAT is the signal to flip the tag to
+    /// `Handled` and delete this test — not before.
+    #[test]
+    fn lieutenant_commander_static_tag_is_a_deliberate_mask() {
+        let (label, support) = static_condition_feature(&StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        assert_eq!(label, "ControlsCommander");
+        assert!(
+            matches!(support, FeatureSupport::Unhandled),
+            "the mask must stay until the two misparses register as gaps; see the \
+             FLIP PROTOCOL on this test"
+        );
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Trample\nLieutenant — As long as you control your commander, this creature gets \
+             +2/+2 and other creatures you control get +2/+2 and have trample.",
+            "Thunderfoot Baloth",
+            &[],
+            &["Creature".to_string()],
+            &["Beast".to_string()],
+        );
+        // Reach-guard: the fixture only exercises the misparse if the parser
+        // really produced the OWNER-scoped commander gate.
+        let commander_statics: Vec<_> = parsed
+            .statics
+            .iter()
+            .filter(|s| {
+                matches!(
+                    &s.condition,
+                    Some(StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own
+                    })
+                )
+            })
+            .collect();
+        assert!(
+            !commander_statics.is_empty(),
+            "the Lieutenant line must parse to an Own-scoped ControlsCommander static: {:#?}",
+            parsed.statics
+        );
+        assert!(
+            commander_statics
+                .iter()
+                .all(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
+            "MISPARSE STILL PRESENT (expected): the \"other creatures you control\" clause \
+             is dropped and the whole Lieutenant grant lands on SelfRef. When this goes \
+             red the parser was fixed — flip `static_condition_feature` to Handled and \
+             delete this test. Got {commander_statics:#?}"
+        );
+    }
+
+    /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
+    /// so the two ownership arms must never print the same string — in ANY of
+    /// the condition-vocabulary formatters.
+    #[test]
+    fn commander_ownership_labels_differ_in_every_formatter() {
+        for (ability_label, trigger_label, static_label) in [
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+            ),
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+            ),
+        ] {
+            assert_eq!(
+                ability_label, trigger_label,
+                "the three mirrors of ONE printed clause must render identically"
+            );
+            assert_eq!(ability_label, static_label);
+        }
+        assert_ne!(
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            }),
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            }),
+            "CR 903.3 \"your commander\" is strictly narrower than CR 903.3d \"a \
+             commander\"; collapsing them prints a weaker predicate than the card"
+        );
+    }
+
     #[test]
     fn vanilla_object_has_no_unimplemented_mechanics() {
         let obj = make_obj();
@@ -13549,6 +13862,19 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::DroppedCondition { condition_text, .. } if condition_text == "as long as")),
             "Should detect dropped 'as long as' condition: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_skips_draft_procedure_lines() {
+        let face = make_face();
+        let oracle = "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack.\nIf you do, put this card into that booster pack.";
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings.is_empty(),
+            "draft-procedure lines are owned by CR 905 draft handling: {findings:?}"
         );
     }
 
@@ -15096,6 +15422,86 @@ mod tests {
                 "StaticCondition::{expected_name} is resolved by layers::evaluate_condition",
             );
         }
+    }
+
+    /// `extract_static_condition_features` must recurse
+    /// `StaticCondition::Not` exactly as it recurses `And` / `Or`. Negation is a
+    /// combinator with no semantics of its own, so swallowing its operand
+    /// reports an UNHANDLED leaf as supported — the fail-open direction coverage
+    /// must never take.
+    ///
+    /// Revert-failing: restore the `_ =>` catch-all for `Not` and the first
+    /// assertion fails — the map holds only `static_condition:Not` (Handled) and
+    /// the `IsMonarch` leaf disappears, so
+    /// `Not(IsMonarch { player: ScopedPlayer })` — the "unless that player is
+    /// the monarch" shape `layers`' entry gate hard-rejects to `false` — would
+    /// be advertised as fully supported.
+    #[test]
+    fn static_condition_not_recurses_into_its_operand() {
+        let feature_map = |cond: &StaticCondition| {
+            let mut features = HashMap::new();
+            extract_static_condition_features(cond, &mut features);
+            features
+        };
+
+        let negated_scoped_monarch = StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer,
+            }),
+        };
+        let features = feature_map(&negated_scoped_monarch);
+        assert_eq!(
+            features.get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Unhandled),
+            "the operand under `Not` must reach the classifier"
+        );
+        assert!(
+            !features.contains_key("static_condition:Not"),
+            "`Not` is a combinator and contributes no tag of its own, exactly \
+             like `And` / `Or`"
+        );
+
+        // Discrimination guard: recursion reports the operand's OWN class — it
+        // does not blanket-downgrade everything under a negation.
+        assert_eq!(
+            feature_map(&StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceIsTapped),
+            })
+            .get("static_condition:SourceIsTapped"),
+            Some(&FeatureSupport::Handled),
+        );
+
+        // Nesting guard: `Not(Or(..))` is a real corpus shape; both operands
+        // must surface, not just the first.
+        let nested = feature_map(&StaticCondition::Not {
+            condition: Box::new(StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::SourceIsTapped,
+                    StaticCondition::IsMonarch {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                ],
+            }),
+        });
+        assert_eq!(
+            nested.get("static_condition:SourceIsTapped"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert_eq!(
+            nested.get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Unhandled)
+        );
+
+        // Reach-guard for the affirmative shape: the printed default subject is
+        // still `Handled`, so the rows above are about the SCOPE, not about
+        // `IsMonarch` having become unsupported wholesale.
+        assert_eq!(
+            feature_map(&StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            })
+            .get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Handled)
+        );
     }
 
     /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by

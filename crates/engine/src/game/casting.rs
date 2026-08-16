@@ -7,14 +7,15 @@ use crate::types::ability::{
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
     StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    TargetRef, TypeFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
 use crate::types::events::{ActivatedAbilityKind, GameEvent};
 use crate::types::game_state::{
-    ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
-    CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
+    ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
+    CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
+    CastingVariantChoiceOption, ConvokeMode, CostResume, DistributionUnit, EmergeSacrificeQuality,
     GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice, ManaChoiceContext,
     ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast, PendingCostMoveResume,
     SneakPlacement, SpellCostSource, StackEntry, StackEntryKind, TargetEffectDetail,
@@ -602,10 +603,15 @@ pub(crate) fn begin_variable_speed_payment(
         player,
         options: (min..=max).map(|value| value.to_string()).collect(),
         choice_type: ChoiceType::NumberRange {
-            min,
-            max,
+            min: u32::from(min),
+            // CR 702.179: a speed payment is bounded by the player's current
+            // speed, so this range states a real maximum.
+            max: Some(u32::from(max)),
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         },
+        // A stated maximum means the options above enumerate the domain; there
+        // is no free entry to contract for.
+        free_entry: None,
         source: None,
         persist_player: None,
     }
@@ -2540,6 +2546,93 @@ pub(crate) fn effective_spell_keywords(
     object_id: ObjectId,
 ) -> Vec<Keyword> {
     effective_spell_keywords_for(state, caster, object_id, false)
+}
+
+/// CR 702.119a-b: The active Emerge keyword supplies both the mana cost and
+/// permanent quality for its required sacrifice cost.
+fn effective_emerge_cost(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::keywords::EmergeCost> {
+    effective_spell_keywords(state, caster, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Emerge(cost) => Some(cost),
+            _ => None,
+        })
+}
+
+/// CR 702.119b: Emerge's sacrifice quality is part of the alternative cost, so
+/// the engine supplies a typed descriptor rather than requiring a client to
+/// interpret its `TargetFilter`. Complex filters use the localized generic
+/// fallback rather than a lossy partial description.
+fn emerge_sacrifice_description(
+    sacrifice_filter: &TargetFilter,
+) -> Option<AlternativeAdditionalCostDescription> {
+    let TargetFilter::Typed(filter) = sacrifice_filter else {
+        return None;
+    };
+    if filter.type_filters.len() != 1
+        || filter.controller.is_some()
+        || !filter.properties.is_empty()
+    {
+        return None;
+    }
+    let quality = match filter.type_filters.first()? {
+        TypeFilter::Artifact => EmergeSacrificeQuality::Artifact,
+        TypeFilter::Battle => EmergeSacrificeQuality::Battle,
+        TypeFilter::Card => EmergeSacrificeQuality::Card,
+        TypeFilter::Creature => EmergeSacrificeQuality::Creature,
+        TypeFilter::Enchantment => EmergeSacrificeQuality::Enchantment,
+        TypeFilter::Instant => EmergeSacrificeQuality::Instant,
+        TypeFilter::Kindred => EmergeSacrificeQuality::Kindred,
+        TypeFilter::Land => EmergeSacrificeQuality::Land,
+        TypeFilter::Permanent => EmergeSacrificeQuality::Permanent,
+        TypeFilter::Planeswalker => EmergeSacrificeQuality::Planeswalker,
+        TypeFilter::Sorcery => EmergeSacrificeQuality::Sorcery,
+        TypeFilter::Subtype(subtype) => EmergeSacrificeQuality::Subtype(subtype.clone()),
+        TypeFilter::Any | TypeFilter::AnyOf(_) | TypeFilter::Non(_) => return None,
+    };
+    Some(AlternativeAdditionalCostDescription::EmergeSacrifice { quality })
+}
+
+/// CR 702.119c + CR 601.2b/h: Declare Emerge's required sacrifice before
+/// targets and mana payment, using the same effective keyword snapshot as the
+/// alternative-cost offer and mana-cost substitution paths.
+fn begin_emerge_cost_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    resolved: ResolvedAbility,
+    distribute: Option<DistributionUnit>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let sacrifice_filter = effective_emerge_cost(state, player, prepared.object_id)
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed(
+                "Emerge casting variant requires an effective Emerge keyword".to_string(),
+            )
+        })?
+        .sacrifice_filter;
+    casting_costs::begin_required_cost_before_targets(
+        state,
+        player,
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        prepared.mana_cost.clone(),
+        Some(prepared.base_mana_cost.clone()),
+        casting_costs::emerge_sacrifice_cost(sacrifice_filter),
+        SpellCostSource::Emerge,
+        prepared.casting_variant,
+        prepared.casting_permission_index,
+        prepared.cast_timing_permission,
+        distribute,
+        prepared.origin_zone,
+        prepared.payment_mode,
+        events,
+    )
 }
 
 /// Fuse-aware sibling of [`effective_spell_keywords`]. `fused` projects a
@@ -5729,9 +5822,9 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Overload);
     }
 
-    // CR 702.119a-c + CR 118.9: Emerge is a hand-zone alternative cost that
-    // requires sacrificing a creature and reducing the emerge cost by that
-    // creature's mana value.
+    // CR 702.119a-b + CR 118.9: Emerge is a hand-zone alternative cost that
+    // requires sacrificing its printed permanent quality and reducing the
+    // emerge cost by that permanent's mana value.
     if obj.zone == Zone::Hand
         && effective_spell_keywords(state, player, object_id)
             .iter()
@@ -6537,16 +6630,10 @@ fn prepare_spell_cast_with_variant_override_inner(
     // (CR 702.119c, CR 601.2h).
     // CR 702.102b: GUARDED — arm requires `casting_variant == Emerge`; Fuse never
     // equals it, so this read is unreachable for a fused split cast.
-    let emerge_cost = if casting_variant == CastingVariant::Emerge {
-        effective_spell_keywords(state, player, object_id)
-            .iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Emerge(cost) => Some(cost.clone()),
-                _ => None,
-            })
-    } else {
-        None
-    };
+    let emerge_cost = (casting_variant == CastingVariant::Emerge)
+        .then(|| effective_emerge_cost(state, player, object_id))
+        .flatten()
+        .map(|cost| cost.mana_cost);
     // CR 702.103a + CR 118.9: When the caller explicitly opted into Bestow (via
     // `variant_override = Some(CastingVariant::Bestow)`), substitute the bestow
     // mana sub-cost taken from the object's `Keyword::Bestow(cost)` payload.
@@ -11474,6 +11561,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(warp_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 // If only normal is affordable, skip warp — prepare_spell_cast will
@@ -11529,6 +11617,7 @@ pub fn handle_cast_spell_with_payment_mode(
                 normal_cost: offer.normal_cost,
                 alternative_cost: offer.alternative_cost,
                 alternative_additional_cost: offer.alternative_additional_cost,
+                alternative_additional_cost_description: None,
             });
         }
         if !eligibility.normal_affordable && eligibility.evoke_affordable {
@@ -11544,26 +11633,29 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 702.119a-c: Emerge — when a hand card has Keyword::Emerge and both
+    // CR 702.119a-b: Emerge — when a hand card has Keyword::Emerge and both
     // costs are affordable, present a choice. Emerge affordability includes a
-    // legal creature sacrifice and the reduced emerge cost after that
-    // sacrificed creature's mana value is subtracted.
+    // legal printed-quality sacrifice and the reduced emerge cost after that
+    // permanent's mana value is subtracted.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
-            if let Some(emerge_cost) = effective_spell_keywords(state, player, object_id)
-                .into_iter()
-                .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Emerge(cost) => Some(cost),
-                    _ => None,
-                })
-            {
+            if let Some(emerge_cost) = effective_emerge_cost(state, player, object_id) {
                 let (normal_cost, normal_affordable) =
                     normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
-                let emerge_cost_eff =
-                    apply_cost_modifiers_to_base(state, player, object_id, emerge_cost.clone())
-                        .unwrap_or_else(|| emerge_cost.clone());
-                let emerge_affordable =
-                    casting_costs::can_pay_emerge_cost(state, player, object_id, &emerge_cost_eff);
+                let emerge_cost_eff = apply_cost_modifiers_to_base(
+                    state,
+                    player,
+                    object_id,
+                    emerge_cost.mana_cost.clone(),
+                )
+                .unwrap_or_else(|| emerge_cost.mana_cost.clone());
+                let emerge_affordable = casting_costs::can_pay_emerge_cost(
+                    state,
+                    player,
+                    object_id,
+                    &emerge_cost_eff,
+                    &emerge_cost.sacrifice_filter,
+                );
                 if normal_affordable && emerge_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
@@ -11573,7 +11665,12 @@ pub fn handle_cast_spell_with_payment_mode(
                         keyword: crate::types::game_state::AlternativeCastKeyword::Emerge,
                         normal_cost,
                         alternative_cost: Some(emerge_cost_eff),
-                        alternative_additional_cost: Some(casting_costs::emerge_sacrifice_cost()),
+                        alternative_additional_cost: Some(casting_costs::emerge_sacrifice_cost(
+                            emerge_cost.sacrifice_filter.clone(),
+                        )),
+                        alternative_additional_cost_description: emerge_sacrifice_description(
+                            &emerge_cost.sacrifice_filter,
+                        ),
                     });
                 }
                 if !normal_affordable && emerge_affordable {
@@ -11625,6 +11722,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(dash_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && dash_affordable {
@@ -11680,6 +11778,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(blitz_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && blitz_affordable {
@@ -11731,6 +11830,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(spectacle_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && spectacle_affordable {
@@ -11788,6 +11888,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(prowl_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && prowl_affordable {
@@ -11837,6 +11938,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(overload_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && overload_affordable {
@@ -11894,6 +11996,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(mtmte_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && mtmte_affordable {
@@ -11947,6 +12050,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(cleave_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && cleave_affordable {
@@ -12049,6 +12153,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: bestow_mana_eff,
                         alternative_additional_cost: bestow_non_mana_part,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if has_legal_creature_target && bestow_affordable {
@@ -12132,6 +12237,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(mutate_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if has_legal_mutate_target && !normal_affordable && mutate_affordable {
@@ -12199,6 +12305,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(awaken_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if has_legal_land && !normal_affordable && awaken_affordable {
@@ -12246,6 +12353,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(impending_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && impending_affordable {
@@ -12293,6 +12401,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(prototype_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && prototype_affordable {
@@ -12350,6 +12459,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(face_down_cost),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 // Only the face-down {3} is affordable — proceed face down.
@@ -12838,30 +12948,20 @@ fn continue_with_prepared(
         ));
     }
 
-    // CR 702.119a-c + CR 601.2b/h: Emerge requires choosing which creature to
-    // sacrifice as the player chooses to pay the emerge cost, then sacrificing
-    // it as that cost is paid. Route this before any target selection so the
-    // required sacrifice is declared on the CR 601.2b axis.
+    // CR 702.119a-c + CR 601.2b/h: Emerge requires choosing the matching
+    // permanent to sacrifice as the player chooses to pay the emerge cost,
+    // then sacrificing it as that cost is paid. Route this before any target
+    // selection so the required sacrifice is declared on the CR 601.2b axis.
     if prepared.casting_variant == CastingVariant::Emerge {
-        return casting_costs::begin_required_cost_before_targets(
+        return begin_emerge_cost_before_targets(
             state,
             player,
-            prepared.object_id,
-            prepared.card_id,
+            &prepared,
             resolved,
-            prepared.mana_cost,
-            Some(prepared.base_mana_cost.clone()),
-            casting_costs::emerge_sacrifice_cost(),
-            SpellCostSource::Emerge,
-            prepared.casting_variant,
-            prepared.casting_permission_index,
-            prepared.cast_timing_permission,
             prepared
                 .ability_def
                 .as_ref()
                 .and_then(|a| a.distribute.clone()),
-            prepared.origin_zone,
-            prepared.payment_mode,
             events,
         );
     }
@@ -13347,22 +13447,12 @@ fn continue_with_no_ability(
         player,
     );
     if prepared.casting_variant == CastingVariant::Emerge {
-        return casting_costs::begin_required_cost_before_targets(
+        return begin_emerge_cost_before_targets(
             state,
             player,
-            prepared.object_id,
-            prepared.card_id,
+            &prepared,
             placeholder,
-            prepared.mana_cost,
-            Some(prepared.base_mana_cost.clone()),
-            casting_costs::emerge_sacrifice_cost(),
-            SpellCostSource::Emerge,
-            prepared.casting_variant,
-            prepared.casting_permission_index,
-            prepared.cast_timing_permission,
             None,
-            prepared.origin_zone,
-            prepared.payment_mode,
             events,
         );
     }
@@ -14228,16 +14318,22 @@ fn can_cast_prepared_now_with_probe(
         return false;
     }
 
-    // CR 702.119a-c: Emerge affordability is the reduced emerge cost after
-    // sacrificing a legal creature, not the unreduced `prepared.mana_cost`.
+    // CR 702.119a-b: Emerge affordability is the reduced emerge cost after
+    // sacrificing a legal matching permanent, not the unreduced
+    // `prepared.mana_cost`.
     if prepared.casting_variant == CastingVariant::Emerge {
         return (prepared.modal.is_some()
             || spell_has_legal_targets_with_probe(state, obj.id, player, probe))
-            && casting_costs::can_pay_emerge_cost(
-                state,
-                player,
-                prepared.object_id,
-                &prepared.mana_cost,
+            && effective_emerge_cost(state, player, prepared.object_id).is_some_and(
+                |emerge_cost| {
+                    casting_costs::can_pay_emerge_cost(
+                        state,
+                        player,
+                        prepared.object_id,
+                        &prepared.mana_cost,
+                        &emerge_cost.sacrifice_filter,
+                    )
+                },
             );
     }
 

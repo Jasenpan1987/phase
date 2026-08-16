@@ -868,7 +868,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ExploreAll { .. }
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Populate
         | Effect::Clash
@@ -918,6 +918,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }

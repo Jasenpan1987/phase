@@ -163,6 +163,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -435,6 +436,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -808,6 +810,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -1487,6 +1490,11 @@ pub(crate) fn controller_ref_player(
             .and_then(|host| host.as_player()),
         // CR 102.1: the player whose turn it is — read live.
         ControllerRef::ActivePlayer => Some(state.active_player),
+        // CR 109.4 + CR 611.2: a resolution-time snapshot; already concrete, so
+        // it needs neither `ability` nor `state` context. This is what makes it
+        // the correct lowering for a continuous effect that outlives its
+        // resolving ability (Gideon Jura's "+2").
+        ControllerRef::SpecificPlayer { id } => Some(*id),
     }
 }
 /// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
@@ -1541,6 +1549,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
@@ -1999,6 +2008,8 @@ fn stack_entry_controller_matches(
         }
         // CR 102.1: the active player, read live.
         Some(ControllerRef::ActivePlayer) => state.active_player == entry_controller,
+        // CR 109.4 + CR 611.2: a resolution-time snapshot — compare directly.
+        Some(ControllerRef::SpecificPlayer { id }) => *id == entry_controller,
     }
 }
 
@@ -2373,6 +2384,58 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.scoped_iteration_player,
         ControllerLookup::LiveOnly,
     )
+}
+
+/// CR 400.3: the zones whose membership is keyed by OWNER rather than controller —
+/// "If an object would go to any library, graveyard, or hand other than its owner's,
+/// it goes to its owner's corresponding zone." The rule enumerates the partition
+/// itself; this predicate is that enumeration and nothing more.
+///
+/// Why ownership is the correct scope for a `ControllerRef::You` filter there:
+/// CR 108.4 + CR 108.4a — a card has a controller only when it represents a
+/// permanent or spell; if it has no controller, use its owner instead. A card in a
+/// hand, library, or graveyard is neither, so CR 109.5 routes "you"/"your" to its
+/// owner. Thus "your graveyard" is an ownership claim even though the parser
+/// represents its player scope as `ControllerRef::You`.
+///
+/// EXILE IS DELIBERATELY EXCLUDED, and CR 400.3 excludes it too — the rule names
+/// library, graveyard, and hand, not exile. The engine matches exiled objects
+/// against their AT-EXILE controller via `effective_controller`'s LKI fallback,
+/// which the Oversimplify class depends on ("creatures they controlled that were
+/// exiled this way" is keyed on who controlled the object when it left, not on who
+/// owns it now). Substituting ownership there would break that class.
+///
+/// The single authority for this partition: `game::targeting::add_zone_targets`
+/// (target enumeration) and `game::off_zone_characteristics` (off-zone keyword
+/// grants) both route through it, so the two cannot drift on which zones are
+/// owner-scoped.
+pub fn is_owner_scoped_zone(zone: Zone) -> bool {
+    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+}
+
+/// CR 400.3 + CR 109.5 + CR 108.4a: match `object_id` against `filter` using the
+/// ownership semantics of the zone it is being enumerated from.
+///
+/// The single entry point for "evaluate this filter against an object in zone Z".
+/// In an owner-scoped zone (see [`is_owner_scoped_zone`]) this delegates to
+/// [`matches_target_filter_in_owner_zone`], so a stale `obj.controller` left behind
+/// by a control-change effect cannot exclude the object from its own owner's
+/// player-scoped query — the state `effects::change_zone` documents for a stolen
+/// creature that dies into its owner's graveyard, where `reset_for_battlefield_exit`
+/// leaves `controller = thief`. Everywhere else it delegates to the ordinary
+/// controller-scoped [`matches_target_filter`].
+pub fn matches_target_filter_for_zone(
+    state: &GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if is_owner_scoped_zone(zone) {
+        matches_target_filter_in_owner_zone(state, object_id, filter, ctx)
+    } else {
+        matches_target_filter(state, object_id, filter, ctx)
+    }
 }
 
 pub fn matches_target_filter_on_battlefield_entry(
@@ -2890,6 +2953,7 @@ fn filter_inner_for_object(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
+        TargetFilter::SourceController => false, // SourceController is a player, not an object
         // CR 102.3: Opponent is a player reference (used only as a slot announcer),
         // never an object.
         TargetFilter::Opponent => false,
@@ -3099,6 +3163,16 @@ fn filter_inner_for_object(
                     // controller against the player whose turn it is (read live).
                     ControllerRef::ActivePlayer => {
                         if state.active_player != obj_ctrl {
+                            return false;
+                        }
+                    }
+                    // CR 109.4 + CR 611.2: "that player controls", already lowered
+                    // to a snapshot id. This is the arm Gideon Jura's "+2" runs
+                    // through at every declare-attackers step: the OBJECT SET is
+                    // re-derived here each time (CR 611.2c), while the player it
+                    // is derived against was frozen when the ability resolved.
+                    ControllerRef::SpecificPlayer { id } => {
+                        if *id != obj_ctrl {
                             return false;
                         }
                     }
@@ -3537,6 +3611,7 @@ fn zone_change_filter_inner(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
+        TargetFilter::SourceController => false,
         // CR 102.3: Opponent is a player reference, never an object.
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
@@ -4000,6 +4075,18 @@ pub fn spell_record_matches_filter(
                     // spell-history record (a cast snapshot carries no live
                     // turn context). Fail closed.
                     ControllerRef::ActivePlayer => return false,
+                    // CR 109.4 + CR 611.2: a snapshot id IS resolvable here, but
+                    // spell history is already scoped to `controller`'s casts, so
+                    // the record matches only when the snapshot names that same
+                    // player. No card produces this combination today (the
+                    // lowering exists only for combat-requirement continuous
+                    // effects), but the comparison is exact rather than
+                    // fail-closed because the id needs no missing context.
+                    ControllerRef::SpecificPlayer { id } => {
+                        if *id != controller {
+                            return false;
+                        }
+                    }
                 }
             }
 
@@ -4030,6 +4117,7 @@ pub fn spell_record_matches_filter(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         // CR 102.3: Opponent is a player reference, never a spell-record filter.
         | TargetFilter::Opponent
         | TargetFilter::OriginalController
@@ -4347,6 +4435,7 @@ fn spell_object_matches_filter_inner(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         // CR 102.3: Opponent is a player reference, never a spell-record filter.
         | TargetFilter::Opponent
         | TargetFilter::OriginalController
@@ -4802,27 +4891,41 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
 }
 
-/// CR 508.5 + CR 508.5a: Source-relative "defending player" resolution. Prefer
-/// the triggered source's captured combat facts — an attacking creature's own
-/// attack trigger snapshots its defending player, and that captured fact must
-/// answer even after the source changes zones (a recycled storage id must never
-/// answer a different ability's filter).
+/// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
+/// `TargetFilter` evaluation.
 ///
-/// But an attachment/anthem source (Equipment, Aura) is NOT itself the attacker:
-/// `capture_combat_status` finds it absent from `combat.attackers` and records
-/// `defending_player: None`. "Whenever equipped creature attacks, ... defending
-/// player controls" (Captain America's Shield, Greatsword of Tyr, and the rest
-/// of that class) must then resolve the defender of the *attacking creature*,
-/// carried by the triggering event. So a captured `None` is "no answer here",
-/// not "no defender" — fall through to `resolve_defending_player`, which reads
-/// the triggering event's attacker. Using `.map().unwrap_or_else()` collapsed
-/// that captured `None` into a spurious `Some(None)` and suppressed the
-/// fallback, silently fizzling the ability (issue #6678).
+/// Identical call, identical arguments, identical rule as the two quantity
+/// doors. The binding decision is NOT made here — see
+/// `combat::defending_player_cr508_5`, which owns it so one anaphor read once
+/// as a `PlayerScope` and once as a `ControllerRef` cannot bind two different
+/// players.
+///
+/// The issue-#6678 distinction still governs the latch and now lives on the
+/// authority's `trigger_source` parameter: an attachment/anthem source
+/// (Equipment, Aura) is not itself the attacker, so `capture_combat_status`
+/// records `defending_player: None`, and that captured `None` means "no answer
+/// here", not "no defender".
+///
+/// When `source.trigger_source` is `None` the authority binds no event, so this
+/// door remains byte-identical to its previous `resolve_defending_player`
+/// behaviour and no unrelated in-flight combat can leak into continuous-effect
+/// filter evaluation.
 fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
-    source
-        .trigger_source
-        .and_then(|context| context.combat_status.defending_player)
-        .or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
+    crate::game::combat::defending_player_cr508_5(state, source.id, source.trigger_source)
+}
+
+/// Drive the production `ControllerRef::DefendingPlayer` door from the
+/// cross-door agreement fixture in `combat.rs`. Mirrors
+/// `quantity::defending_player_for_quantity_context_for_test` so the fixture
+/// compares two PRODUCTION doors rather than two hand-built approximations.
+#[cfg(test)]
+pub(crate) fn source_defending_player_for_test(
+    state: &GameState,
+    source_id: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<PlayerId> {
+    let context = source_context_from_filter(state, source_id, None, None, trigger_source, None);
+    source_defending_player(state, &context)
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {
@@ -5506,6 +5609,11 @@ fn matches_filter_prop(
                     (Some(ControllerRef::EnchantedPlayer), Some(pid)) => perm.controller == pid,
                     // CR 102.1: active-player-scoped name match (resolved live).
                     (Some(ControllerRef::ActivePlayer), Some(pid)) => perm.controller == pid,
+                    // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+                    // no ability/event context needed, unlike the fail-closed siblings above.
+                    (Some(ControllerRef::SpecificPlayer { .. }), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -5565,6 +5673,9 @@ fn matches_filter_prop(
             }
             // CR 102.1: Ownership relative to the active player (read live).
             ControllerRef::ActivePlayer => state.active_player == obj.owner,
+            // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+            // no ability/event context needed, unlike the fail-closed siblings above.
+            ControllerRef::SpecificPlayer { id } => *id == obj.owner,
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
         // source is an Aura ("enchanted creature gets +1/+1"). When the source
@@ -6314,6 +6425,9 @@ fn zone_change_record_matches_property(
             }
             // CR 102.1: Ownership relative to the active player (read live).
             ControllerRef::ActivePlayer => state.active_player == record.owner,
+            // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+            // no ability/event context needed, unlike the fail-closed siblings above.
+            ControllerRef::SpecificPlayer { id } => *id == record.owner,
         },
         // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
         // applied to the snapshot subtypes, including changeling snapshots.
@@ -6681,6 +6795,9 @@ fn attachment_controller_matches(
         }
         // CR 102.1: attachment controller relative to the active player (live).
         Some(ControllerRef::ActivePlayer) => state.active_player == attachment_controller,
+        // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+        // no ability/event context needed, unlike the fail-closed siblings above.
+        Some(ControllerRef::SpecificPlayer { id }) => *id == attachment_controller,
     }
 }
 
@@ -7343,6 +7460,9 @@ fn player_matches_target_filter_with(
             // active-player resolution path runs through `controller_ref_player`
             // where `state` is in scope.
             Some(ControllerRef::ActivePlayer) => false,
+            // CR 109.4 + CR 611.2: a resolution-time snapshot player id — concrete with
+            // no ability/event context needed, unlike the fail-closed siblings above.
+            Some(ControllerRef::SpecificPlayer { id }) => *id == player_id,
             None => true,
         },
         // Typed filters with type_filters don't match players
@@ -14272,11 +14392,11 @@ mod characteristic_read_classification_tests {
         let mut carriers = Vec::new();
         let mut current: Option<&str> = None;
         for line in body.lines() {
+            // Doc comments name `ControllerRef` in prose; they declare nothing — and neither
+            // does a TRAILING comment on a field line, which the shared
+            // `crate::source_census::code` rule removes too.
+            let line = crate::source_census::code(line);
             let trimmed = line.trim_start();
-            // Doc comments name `ControllerRef` in prose; they declare nothing.
-            if trimmed.starts_with("//") {
-                continue;
-            }
             // A variant header is the only thing at one indent level that opens
             // with an uppercase letter; its fields sit one level deeper.
             if let Some(header) = line

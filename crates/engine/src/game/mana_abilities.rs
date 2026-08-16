@@ -6204,6 +6204,7 @@ mod tests {
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source,
             }
         }

@@ -19911,10 +19911,11 @@ pub enum AbilityCondition {
     /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
-    /// CR 603.12: Literal "When you do" creation gate for a reflexive triggered
-    /// ability. Once the antecedent occurred, the runtime materializer consumes
-    /// this root condition on the trigger clone so it cannot recreate itself.
-    /// Unpayable or declined cost antecedents do not create the trigger.
+    /// CR 603.12: "When you do" — a reflexive trigger based on whether the
+    /// parent event actually occurred. An optional non-cost parent must be
+    /// performed; an unpayable or declined `Effect::PayCost` is not an occurrence.
+    /// The runtime materializer consumes this root condition on the trigger clone
+    /// so the reflexive ability cannot recreate itself.
     WhenYouDo,
     /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
     /// executes only if the spell was cast. `zone: None` = cast from any origin;

@@ -102,22 +102,26 @@ fn push_to_stack_with_firing(
         entry.kind,
         StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
     ) {
+        if let Some(ability) = entry.ability_mut() {
+            // CR 400.7 + CR 113.7a: Capture the source incarnation for every
+            // activated or triggered ability, including non-transforming
+            // permanents. The transformation guard below has a narrower scope.
+            if ability.source_incarnation.is_none() {
+                ability
+                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
+            }
+        }
+
         let source = state
             .objects
             .get(&entry.source_id)
             .filter(|object| object.back_face.is_some());
         let count = source.map(|object| object.transformation_count);
-        let incarnation = source.map(|object| object.incarnation);
         if let Some(ability) = entry.ability_mut() {
             // CR 701.27f: delayed triggered abilities already carry their
             // creation-time generation and must not be restamped when fired.
             if ability.context.source_transformation_count.is_none() {
                 ability.set_source_transformation_count_recursive(count);
-                // CR 400.7: a re-entered source can share the same storage ID
-                // and transformation generation, so retain its incarnation too.
-                if ability.source_incarnation.is_none() {
-                    ability.set_source_incarnation_recursive(incarnation);
-                }
             }
         }
     }
@@ -3129,6 +3133,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3190,6 +3195,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -3344,6 +3350,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3400,6 +3407,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -3539,6 +3547,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3595,6 +3604,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -4181,6 +4191,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: a_context,
         optional_targeting: a_optional_targeting,
         optional: a_optional,
+        optional_player: a_optional_player,
         optional_for: a_optional_for,
         multi_target: a_multi_target,
         target_constraints: a_target_constraints,
@@ -4238,6 +4249,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: b_context,
         optional_targeting: b_optional_targeting,
         optional: b_optional,
+        optional_player: b_optional_player,
         optional_for: b_optional_for,
         multi_target: b_multi_target,
         target_constraints: b_target_constraints,
@@ -4307,6 +4319,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_context == b_context
         && a_optional_targeting == b_optional_targeting
         && a_optional == b_optional
+        && a_optional_player == b_optional_player
         && a_optional_for == b_optional_for
         && a_multi_target == b_multi_target
         && a_target_constraints == b_target_constraints

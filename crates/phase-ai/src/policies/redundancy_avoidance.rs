@@ -417,7 +417,7 @@ fn redundancy_delta(
         | Effect::ExploreAll { .. }
         | Effect::Investigate
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::EndTheTurn
@@ -590,6 +590,10 @@ fn redundancy_delta(
         | Effect::Cascade
         | Effect::Ripple { .. }
         | Effect::Reveal { .. }
+        // CR 101.4: no targets and nothing to deduplicate — publishing a
+        // committed number is idempotent, so a second application is harmless
+        // rather than redundant in the sense this policy detects.
+        | Effect::RevealChosenNumbers { .. }
         // CR 702.xxx: Prepare (Strixhaven) — no redundancy detection.
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }

@@ -16180,13 +16180,10 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // Maintainer port: current main moved the three producers to
-                // `:6632/:6709/:9914`; this PR's reflexive-trigger work adds 148 lines before
-                // the first two and 148 before the third, yielding the re-derived merge-tree
-                // coordinates below. The production set remains five entries.
-                "game/effects/mod.rs:6780".to_string(),
-                "game/effects/mod.rs:6857".to_string(),
-                "game/effects/mod.rs:10062".to_string(),
+                // Re-derived against this merged tree. The production set remains five entries.
+                "game/effects/mod.rs:6922".to_string(),
+                "game/effects/mod.rs:6999".to_string(),
+                "game/effects/mod.rs:10237".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

@@ -48,6 +48,33 @@ use super::ability_utils::{
 use super::life_costs::PayLifeCostResult;
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
+pub(crate) const ABANDONED_CAST_FINALIZATION_ERROR: &str = "__abandoned_cast_finalization__";
+
+fn abandoned_cast_finalization_error() -> EngineError {
+    EngineError::InvalidAction(ABANDONED_CAST_FINALIZATION_ERROR.to_string())
+}
+
+pub(crate) fn is_abandoned_cast_finalization(error: &EngineError) -> bool {
+    matches!(
+        error,
+        EngineError::InvalidAction(message) if message == ABANDONED_CAST_FINALIZATION_ERROR
+    )
+}
+
+fn ensure_pending_spell_announcement_is_live(
+    state: &GameState,
+    pending: &PendingCast,
+) -> Result<(), EngineError> {
+    if pending.activation_ability_index.is_none()
+        && !state
+            .stack
+            .iter()
+            .any(|entry| entry.id == pending.object_id)
+    {
+        return Err(abandoned_cast_finalization_error());
+    }
+    Ok(())
+}
 
 /// The mana payment authority stamps this on the spell object before casting
 /// finalization publishes the spell-cast event.
@@ -2879,7 +2906,7 @@ pub(crate) fn handle_sacrifice_for_cost(
         {
             Some(SpellCostSource::Offering)
         } else if payment.source == SpellCostSource::Emerge
-            && is_emerge_sacrifice_cost(payment.cost)
+            && is_emerge_sacrifice_cost(state, player, pending.object_id, payment.cost)
         {
             Some(SpellCostSource::Emerge)
         } else {
@@ -7759,52 +7786,58 @@ fn is_offering_sacrifice_cost(
     )
 }
 
-fn emerge_sacrifice_filter() -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::creature())
-}
-
-fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
+fn is_emerge_sacrifice_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    let Some(sacrifice_filter) = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            crate::types::keywords::Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
+            _ => None,
+        })
+    else {
+        return false;
+    };
     matches!(
         cost,
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::count(1)
-                && cost.target == emerge_sacrifice_filter()
+                && cost.target == sacrifice_filter
     )
 }
 
-/// CR 702.119a-c: Build the required sacrifice component of Emerge's
-/// alternative cost. The sacrificed creature's mana value is applied as a cost
-/// reduction by `handle_sacrifice_for_cost` while the creature is still on the
+/// CR 702.119a-b: Build Emerge's required sacrifice component from its printed
+/// permanent-quality filter. The sacrificed permanent's mana value is applied
+/// as a cost reduction by `handle_sacrifice_for_cost` while it remains on the
 /// battlefield.
-pub(super) fn emerge_sacrifice_cost() -> AbilityCost {
-    AbilityCost::Sacrifice(SacrificeCost::count(emerge_sacrifice_filter(), 1))
+pub(super) fn emerge_sacrifice_cost(sacrifice_filter: TargetFilter) -> AbilityCost {
+    AbilityCost::Sacrifice(SacrificeCost::count(sacrifice_filter, 1))
 }
 
-/// CR 702.119a-c: Emerge can be paid only if a legal creature can be
+/// CR 702.119a-b: Emerge can be paid only if a matching permanent can be
 /// sacrificed and the resulting reduced emerge mana cost can be paid.
 pub(super) fn can_pay_emerge_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     emerge_cost: &ManaCost,
+    sacrifice_filter: &TargetFilter,
 ) -> bool {
-    super::casting::find_eligible_sacrifice_targets(
-        state,
-        player,
-        object_id,
-        &emerge_sacrifice_filter(),
-    )
-    .into_iter()
-    .any(|creature| {
-        let mut reduced = emerge_cost.clone();
-        apply_emerge_cost_reduction(state, creature, &mut reduced);
-        // CR 601.2f + CR 702.119a: Affordability probes must include the
-        // final Trinisphere-class floor after Emerge's sacrifice reduction.
-        if !cost_has_x(&reduced) {
-            super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
-        }
-        super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-    })
+    super::casting::find_eligible_sacrifice_targets(state, player, object_id, sacrifice_filter)
+        .into_iter()
+        .any(|permanent| {
+            let mut reduced = emerge_cost.clone();
+            apply_emerge_cost_reduction(state, permanent, &mut reduced);
+            // CR 601.2f + CR 702.119a: Affordability probes must include the
+            // final Trinisphere-class floor after Emerge's sacrifice reduction.
+            if !cost_has_x(&reduced) {
+                super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
+            }
+            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+        })
 }
 
 fn additional_cost_x_max(
@@ -8450,8 +8483,8 @@ pub(super) fn apply_offering_cost_reduction(
     *spell_generic = spell_generic.saturating_sub(sac_generic);
 }
 
-/// CR 702.119a: Reduce the Emerge cost by generic mana equal to the sacrificed
-/// creature's mana value. Colored pips in the Emerge cost are never reduced.
+/// CR 702.119a-b: Reduce the Emerge cost by generic mana equal to the sacrificed
+/// permanent's mana value. Colored pips in the Emerge cost are never reduced.
 pub(super) fn apply_emerge_cost_reduction(
     state: &GameState,
     sacrifice_id: ObjectId,
@@ -9144,25 +9177,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let cost_event_start = events.len();
-    // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
-    // being paid with life. A compleated planeswalker entering from this spell
-    // exposes this as an intrinsic AddCounter replacement so it can order with
-    // Doubling Season-class modifiers (CR 616.1). Harmless for non-compleated
-    // spells (the field is only read for `Keyword::Compleated` planeswalkers).
-    {
-        let phyrexian_life_paid = phyrexian_choices
-            .map(|choices| {
-                choices
-                    .iter()
-                    .filter(|c| matches!(**c, crate::types::game_state::ShardChoice::PayLife))
-                    .count() as u32
-            })
-            .unwrap_or(0);
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            obj.phyrexian_life_paid = phyrexian_life_paid;
-        }
-    }
-
     let FinalizePrePaymentChecks {
         early_waiting_for,
         cascade_cast_transformed,
@@ -9186,6 +9200,34 @@ fn finalize_cast_with_phyrexian_choices_inner(
     };
     if let Some(waiting_for) = early_waiting_for {
         return Ok(waiting_for);
+    }
+
+    // CR 601.2a + CR 800.4a: A departing caster's announcement leaves the stack.
+    // Validate and retain its position before payment or spell-object mutation,
+    // so its abandoned cast cannot spend costs or move an entryless object.
+    let entry_position = state
+        .stack
+        .iter()
+        .rposition(|entry| entry.id == object_id)
+        .ok_or_else(abandoned_cast_finalization_error)?;
+
+    // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
+    // being paid with life. A compleated planeswalker entering from this spell
+    // exposes this as an intrinsic AddCounter replacement so it can order with
+    // Doubling Season-class modifiers (CR 616.1). Harmless for non-compleated
+    // spells (the field is only read for `Keyword::Compleated` planeswalkers).
+    {
+        let phyrexian_life_paid = phyrexian_choices
+            .map(|choices| {
+                choices
+                    .iter()
+                    .filter(|c| matches!(**c, crate::types::game_state::ShardChoice::PayLife))
+                    .count() as u32
+            })
+            .unwrap_or(0);
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.phyrexian_life_paid = phyrexian_life_paid;
+        }
     }
 
     let cast_transformed = cascade_cast_transformed
@@ -9662,20 +9704,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
         }
     }
 
-    // CR 601.2i: Update the existing stack entry (pushed at announcement) with
-    // the finalized ability and the actual mana spent. The entry must still be
-    // present — no one else can have pushed/popped between announce and
-    // finalize within a single cast.
-    //
-    // CR 405.2: the position is captured rather than left implicit. This is a
-    // LAST-match scan, so recording the index it found is what lets a replay
-    // install into the same entry instead of re-scanning a stack that may have
-    // diverged.
-    let entry_position = state
-        .stack
-        .iter()
-        .rposition(|entry| entry.id == object_id)
-        .expect("spell stack entry from announcement still present at finalize");
+    // CR 601.2i: Retag the existing announcement entry with the finalized
+    // ability and actual mana spent. `entry_position` was validated before
+    // payment, while the cast owns this atomic payment/finalization interval.
     let resulting_kind = StackEntryKind::Spell {
         card_id,
         ability: stack_ability.map(Box::new),
@@ -9746,6 +9777,13 @@ fn finalize_cast_with_phyrexian_choices_inner(
         card_id,
         controller: player,
         object_id,
+        cast_mana_value: Some(
+            state
+                .objects
+                .get(&object_id)
+                .expect("finalized spell must remain available for cast event")
+                .spell_mana_value(),
+        ),
     });
 
     // CR 608.2c + CR 608.2g + CR 601.2i: A paid during-resolution cast is the
@@ -12462,6 +12500,12 @@ fn finalize_mana_payment_with_resume(
     // Phyrexian mana AND at least one shard has both mana and life options available.
     // `PendingCast` stays in `state.pending_cast` across the pause — the resume handler
     // in `engine.rs` calls `finalize_mana_payment_with_phyrexian_choices`.
+    if let Some(pending) = state.pending_cast.as_ref() {
+        if let Err(error) = ensure_pending_spell_announcement_is_live(state, pending) {
+            state.pending_cast = None;
+            return Err(error);
+        }
+    }
     if let Some(pending_ref) = state.pending_cast.as_ref() {
         let mana_cost = pending_ref.cost.clone();
         let source_id = pending_ref.object_id;
@@ -12509,6 +12553,7 @@ fn finalize_mana_payment_with_resume(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+    ensure_pending_spell_announcement_is_live(state, &pending)?;
     let resumed_prepaid_actual_mana_spent = pending.prepaid_actual_mana_spent.take();
     let mut pending_for_restore = pending.clone();
 
@@ -12822,6 +12867,7 @@ fn finalize_mana_payment_with_resume(
     state.active_casting_permission_index = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
+        Err(err) if is_abandoned_cast_finalization(&err) => Err(err),
         // CR 601.2h + CR 605.3b + CR 616.1: An auto-tapped mana ability may
         // pause on a replacement-aware cost move. Its serialized cursor owns
         // the source activation; retain the outer cast for the exact
@@ -12881,6 +12927,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+    ensure_pending_spell_announcement_is_live(state, &pending)?;
     let resumed_prepaid_actual_mana_spent = pending.prepaid_actual_mana_spent.take();
     let mut pending_for_restore = pending.clone();
     let mana_resume = ManaAbilityResume::PhyrexianCastPayment {
@@ -13206,6 +13253,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     state.active_casting_permission_index = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
+        Err(err) if is_abandoned_cast_finalization(&err) => Err(err),
         // CR 601.2h + CR 605.3b + CR 616.1: See the ordinary payment resume
         // above. A Phyrexian choice does not change the cursor ownership.
         Err(_) if super::casting::mana_ability_cost_payment_is_paused(state) => {

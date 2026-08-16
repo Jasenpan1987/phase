@@ -503,6 +503,7 @@ impl EventObjectSnapshot {
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::SourceController
             | TargetFilter::Opponent
             | TargetFilter::Owner
             | TargetFilter::AllPlayers
@@ -773,6 +774,11 @@ pub enum GameEvent {
         card_id: CardId,
         controller: PlayerId,
         object_id: ObjectId, // CR 601.2a: The spell object on the stack
+        /// CR 202.3e + CR 601.2i: Mana value while this cast was on the stack,
+        /// including the announced value of X. Optional for legacy and
+        /// synthetic events that do not carry cast-time characteristics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_value: Option<u32>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -1318,6 +1324,20 @@ pub enum GameEvent {
         #[serde(default)]
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
+    },
+    /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
+    /// instruction ("then all players reveal those numbers simultaneously" —
+    /// Wheel of Misfortune). One event carries every number published by the
+    /// single instruction, because the card reveals them SIMULTANEOUSLY; a
+    /// per-player event would imply an ordering the rules do not have.
+    ///
+    /// Distinct from `CardsRevealed`, which is CR 701.20 (showing a card). This
+    /// is the game log's and the frontend's view of the secret→public
+    /// transition that `game::visibility` enforces on
+    /// `ChosenAttribute::RevealedNumber`.
+    ChosenNumbersRevealed {
+        /// Each revealing player and the number they had chosen, in APNAP order.
+        numbers: Vec<(PlayerId, u32)>,
     },
     CombatDamageDealtToPlayer {
         player_id: PlayerId,

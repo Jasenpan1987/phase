@@ -11,10 +11,10 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
-    TypedFilter, ZoneRef,
+    ManaSpendPermission, ModalChoice, ObjectScope, PerpetualModification, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2472,6 +2472,100 @@ fn trigger_etb_subject_enters_untapped_attaches_negated_condition() {
             condition: Box::new(TriggerCondition::ZoneChangeObjectIsTapped)
         })
     );
+    let execute = def.execute.as_deref().expect("Charismatic execute ability");
+    assert!(execute.optional, "they may tap must remain optional");
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer),
+        "the parsed `they` subject, not the tap shape, names the optional actor"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
+    let decline = execute
+        .sub_ability
+        .as_deref()
+        .expect("decline token continuation");
+    assert_eq!(
+        decline.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }),
+        "the Vampire token must remain the optional tap's decline branch"
+    );
+}
+
+/// CR 608.2d: The controller's "you may" modal must not acquire the
+/// event-relative actor provenance reserved for an explicit "they may" subject.
+#[test]
+fn trigger_you_may_tap_does_not_stamp_triggering_player_as_optional_actor() {
+    let def = parse_trigger_line(
+        "Whenever a creature enters, you may tap that permanent.",
+        "Controller's Tap",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert!(execute.optional);
+    assert_eq!(execute.optional_player, None);
+}
+
+/// CR 603.4 + CR 608.2d: Actor provenance survives a supported intervening-if
+/// wrapper, so its `they may` body still prompts the player from the event.
+#[test]
+fn conditional_they_may_tap_stamps_triggering_player_as_optional_actor() {
+    let def = parse_trigger_line(
+        "Whenever a creature enters, if that creature is white, they may tap that permanent.",
+        "Conditional Tap",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert!(execute.optional);
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer)
+    );
+}
+
+/// CR 603.2 + CR 603.6 + CR 608.2k: Only a trigger's direct, untargeted
+/// "tap that permanent" instruction is rebound to the zone-change object.
+/// A reflexive selected tap and an untap anaphor retain their own referents.
+#[test]
+fn event_source_tap_lift_preserves_reflexive_and_untap_referents() {
+    fn first_tap(ability: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(ability.effect.as_ref(), Effect::SetTapState { .. }) {
+            return Some(ability.effect.as_ref());
+        }
+        ability.sub_ability.as_deref().and_then(first_tap)
+    }
+
+    let snare = parse_trigger_line(
+        "When Snaremaster Sprite enters, you may pay {2}. When you do, tap target creature an opponent controls and put a stun counter on it.",
+        "Snaremaster Sprite",
+    );
+    assert!(matches!(
+        snare.execute.as_deref().and_then(first_tap),
+        Some(Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            state: TapStateChange::Tap,
+            ..
+        })
+    ));
+
+    let howl = parse_trigger_line(
+        "When Howl of the Hunt enters, if enchanted creature is a Wolf or Werewolf, untap that creature.",
+        "Howl of the Hunt",
+    );
+    assert!(matches!(
+        howl.execute.as_deref().and_then(first_tap),
+        Some(Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            state: TapStateChange::Untap,
+            ..
+        })
+    ));
 }
 
 // Guard: a bare "enters" (no tapped-state rider) must NOT attach a
@@ -12259,27 +12353,49 @@ fn self_etb_sacrifice_it_anaphor_binds_to_self_ref() {
     );
 }
 
+/// CR 701.9b + CR 118.12a: Balduvian Horde — "sacrifice it unless you discard a
+/// card at random". The clause is now fully supported, and this test tracks the
+/// third state it has been in.
+///
+/// Originally it asserted a `Chosen` discard: the clause lowered, but the payer
+/// got to pick, which made the printed cost strictly cheaper. It was then
+/// changed to assert `Unimplemented` — honest, but it dropped the card. Now the
+/// unless-payment resolver honors `CardSelectionMode::Random`
+/// (`effects::discard::discard_at_random`), so the clause lowers truthfully:
+/// a real unless-cost whose selection mode is `Random`.
+///
+/// `selection` is the load-bearing assertion. A `Chosen` here would be the
+/// original bug back again, and the test would still otherwise pass.
 #[test]
-fn trigger_unless_you_discard_a_card_at_random_preserves_unsupported_clause() {
-    // Balduvian Horde's random discard cannot be lowered as a player-chosen
-    // unless payment: the payment resolver currently ignores selection mode.
-    // Keep the entire clause visible as unsupported until it can honor random
-    // discard rather than silently changing the card's behavior.
+fn trigger_unless_you_discard_a_card_at_random_lowers_as_random_cost() {
     let def = parse_trigger_line(
         "When ~ enters, sacrifice it unless you discard a card at random.",
         "Balduvian Horde",
     );
-    assert!(
-        def.unless_pay.is_none(),
-        "random discard must not lower to a player-chosen unless payment"
-    );
-    let execute = def
-        .execute
+
+    let unless_pay = def
+        .unless_pay
         .as_ref()
-        .expect("should preserve the unsupported clause");
+        .expect("the random discard must lower to a real unless cost");
+    assert_eq!(unless_pay.payer, TargetFilter::Controller);
     assert!(
-        matches!(*execute.effect, Effect::Unimplemented { .. }),
-        "random-discard unless clause must remain visible as unimplemented, got {:?}",
+        matches!(
+            unless_pay.cost,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Random,
+                self_scope: DiscardSelfScope::FromHand
+            }
+        ),
+        "cost must be a one-card RANDOM discard, got {:?}",
+        unless_pay.cost
+    );
+
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(*execute.effect, Effect::Sacrifice { .. }),
+        "the unless-effect is the self-sacrifice, got {:?}",
         execute.effect
     );
 }
@@ -13561,18 +13677,80 @@ fn unless_discard_cost_phrase_rejects_zero_count() {
     );
 }
 
-/// CR 701.9b: random discard is distinct from a player-selected discard. Until
-/// the unless-payment resolver preserves `CardSelectionMode::Random`, this
-/// phrase must remain unsupported rather than being lowered dishonestly.
+/// CR 701.9b: random discard is distinct from a player-selected discard, and
+/// the phrase now lowers TRUTHFULLY as `CardSelectionMode::Random` instead of
+/// having to pick between two wrong answers. This test previously asserted the
+/// clause stayed unsupported — the right call only while the unless-payment
+/// resolver ignored `selection`. It now honors it
+/// (`effects::discard::discard_at_random`), so the honest lowering is the typed
+/// one. The mode must be `Random`, not `Chosen`, on BOTH payer forms, or a
+/// Balduvian Horde-class cost silently gets cheaper than printed.
 #[test]
-fn unless_discard_cost_phrase_rejects_random_discard() {
+fn unless_discard_cost_phrase_lowers_random_discard_as_random() {
+    let (they_cost, rest) =
+        parse_unless_they_discard_cost("a card at random").expect("the they form must lower");
     assert!(
-        parse_unless_they_discard_cost("a card at random").is_none(),
-        "the anaphoric-payer form must not lower random discard as chosen"
+        rest.trim().is_empty(),
+        "the whole branch should be consumed, left {rest:?}"
+    );
+    let you_cost =
+        parse_unless_alt_cost("you discard a card at random").expect("the you form must lower");
+    assert_eq!(
+        they_cost, you_cost,
+        "both payer forms must agree on the random tail"
     );
     assert!(
-        parse_unless_alt_cost("you discard a card at random").is_none(),
-        "the controller form must not lower random discard as chosen"
+        matches!(
+            they_cost,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "expected a one-card RANDOM discard, got {they_cost:?}"
+    );
+}
+
+/// The random tail must be FULLY consumed. A prefix match would swallow
+/// "at randomly" and "at random foo" and lower an unrecognized clause as a
+/// random discard, which is the coverage-dishonesty failure mode in the other
+/// direction — claiming support for text the grammar never understood.
+#[test]
+fn unless_discard_cost_phrase_rejects_partial_random_suffix() {
+    for tail in [
+        "a card at randomly",
+        "a card at random foo",
+        "a card atrandom",
+    ] {
+        assert!(
+            parse_unless_they_discard_cost(tail).is_none(),
+            "{tail:?} is not the random-discard grammar and must not lower"
+        );
+        assert!(
+            parse_unless_alt_cost(&format!("you discard {tail}")).is_none(),
+            "{tail:?} must not lower on the controller form either"
+        );
+    }
+}
+
+/// NO-REGRESSION twin: without an "at random" tail the discard stays
+/// player-chosen. Guards against the randomness axis leaking onto every
+/// unless-discard — which would make Court of Ambition pick for the opponent
+/// instead of letting them choose what to pitch.
+#[test]
+fn unless_discard_cost_phrase_without_random_tail_stays_chosen() {
+    let cost = parse_unless_alt_cost("you discard a card").expect("plain discard must lower");
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::Discard {
+                selection: CardSelectionMode::Chosen,
+                ..
+            }
+        ),
+        "a plain discard must remain player-chosen, got {cost:?}"
     );
 }
 
@@ -20895,8 +21073,80 @@ fn parse_hixus_keeps_entered_this_turn_intervening_if() {
 #[test]
 fn bridge_monarch() {
     assert_eq!(
-        static_condition_to_trigger_condition(&StaticCondition::IsMonarch),
-        Some(TriggerCondition::IsMonarch),
+        static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
+            player: PlayerScope::Controller
+        }),
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::Controller
+        }),
+    );
+}
+
+/// CR 725.1 + CR 109.5: the subject scope must SURVIVE the static→trigger
+/// bridge. Dropping it here is the silent-degradation failure mode — the
+/// condition would keep parsing but rebind to the ability's controller.
+///
+/// Revert-failing against an `IsMonarch { .. } => IsMonarch { Controller }` arm.
+#[test]
+fn bridge_monarch_carries_a_non_controller_subject_scope() {
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer
+        }),
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer
+        }),
+    );
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer
+        }),
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer
+        }),
+    );
+    // The negated bridge arm ("if you're not the monarch") must carry it too.
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            }),
+        }),
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            }),
+        }),
+    );
+}
+
+/// CR 725.1: `AbilityCondition` has no player axis, so a scoped monarch gate
+/// must FAIL CLOSED rather than lower to the controller-scoped variant.
+///
+/// Revert-failing against a `{ .. }`-collapsing arm, which would return
+/// `Some(IsMonarch)` for the scoped form and silently rebind it.
+#[test]
+fn ability_condition_lowering_refuses_a_scoped_monarch_gate() {
+    use crate::parser::oracle_effect::conditions::static_condition_to_ability_condition;
+    use crate::parser::oracle_ir::context::ParseContext;
+
+    assert_eq!(
+        static_condition_to_ability_condition(
+            &StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            },
+            &mut ParseContext::default()
+        ),
+        Some(AbilityCondition::IsMonarch),
+    );
+    assert_eq!(
+        static_condition_to_ability_condition(
+            &StaticCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            },
+            &mut ParseContext::default()
+        ),
+        None,
     );
 }
 
@@ -20905,7 +21155,9 @@ fn bridge_opponent_is_monarch_intervening_if() {
     let sc = StaticCondition::And {
         conditions: vec![
             StaticCondition::Not {
-                condition: Box::new(StaticCondition::IsMonarch),
+                condition: Box::new(StaticCondition::IsMonarch {
+                    player: PlayerScope::Controller,
+                }),
             },
             StaticCondition::Not {
                 condition: Box::new(StaticCondition::NoMonarch),
@@ -20917,7 +21169,9 @@ fn bridge_opponent_is_monarch_intervening_if() {
         Some(TriggerCondition::And {
             conditions: vec![
                 TriggerCondition::Not {
-                    condition: Box::new(TriggerCondition::IsMonarch),
+                    condition: Box::new(TriggerCondition::IsMonarch {
+                        player: PlayerScope::Controller
+                    }),
                 },
                 TriggerCondition::Not {
                     condition: Box::new(TriggerCondition::NoMonarch),
@@ -20943,7 +21197,7 @@ fn queen_marchesa_upkeep_attaches_opponent_monarch_intervening_if() {
                 conditions[0],
                 TriggerCondition::Not {
                     condition: ref inner,
-                } if matches!(inner.as_ref(), TriggerCondition::IsMonarch)
+                } if matches!(inner.as_ref(), TriggerCondition::IsMonarch { player: PlayerScope::Controller })
             )
             && matches!(
                 conditions[1],
@@ -28871,4 +29125,239 @@ fn synthetic_sentence_separated_mass_move_damage_keeps_event_context_amount() {
         } => {}
         other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
     }
+}
+
+/// SHAPE — inline modal roots are independent of `sub_ability`, but a
+/// targetless top-level tap in each mode still refers to the zone-change event
+/// source. This pins the parser's event-source rewrite without widening it
+/// through an explicitly chosen target.
+#[test]
+fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
+    let mode = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    );
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal marker", "Choose one"),
+    )
+    .with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            mode_descriptions: vec!["Tap that permanent.".to_string()],
+            ..Default::default()
+        },
+        vec![mode],
+    );
+
+    lift_parent_target_to_triggering_source_in_ability(&mut root);
+
+    assert!(matches!(
+        root.mode_abilities[0].effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
+}
+
+// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the passive-voice
+// damage-received axis grid. These test the parameterized combinator's AXES
+// (voice × channel × kind × amount), not any single card's replay — the four
+// former `tag()` cells are kept as explicit regression guards below. The amount
+// axis is exercised as a REFUSAL: the combinator parses a threshold, but the
+// consumer arm declines to emit one because whole-event aggregation is not yet
+// modeled, so the tests below pin `Unknown` rather than a shape.
+
+#[test]
+fn dealt_damage_axes_noncombat_total() {
+    // CR 120.2b: noncombat damage is dealt as an effect of a spell or ability.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt noncombat damage, create that many Treasure tokens.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert_eq!(def.damage_amount, None);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn dealt_damage_axes_amount_threshold_is_refused() {
+    // CR 120.4b + CR 120.4d: simultaneous damage is one event, so a received-
+    // damage threshold reads the event total. Innocent Bystander is this cell's
+    // entire population and its ruling requires "3 or more damage all at once",
+    // which the per-`(source, amount)` matcher cannot express. The arm refuses
+    // rather than emit a def that would silently under-fire on two 2-damage
+    // sources. Asserting `Unknown` — not a shape — is what makes this test able
+    // to fail if the refusal is ever dropped.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt 3 or more damage, investigate.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "amount-bearing received-damage triggers must stay honestly unsupported \
+         until the aggregation axis is modeled, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn dealt_damage_axes_amount_exactly_is_refused() {
+    // Same refusal on the tail's second comparator branch (`parse_exactly`):
+    // "exactly 2" is likewise a whole-event quantity.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt exactly 2 damage, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "exactly-N received-damage triggers must stay honestly unsupported, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn dealt_damage_axes_plural_noncombat() {
+    // The plural voice parses, and the consumer arm does NOT set `batched` —
+    // that is the caller's `"one or more "` scan, pinned by the sibling test.
+    let def = parse_trigger_line(
+        "Whenever creatures you control are dealt noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert!(
+        !def.batched,
+        "no SimpleEvent arm may set `batched`; only the caller's \"one or more \" scan does"
+    );
+}
+
+#[test]
+fn dealt_damage_axes_plural_one_or_more_noncombat() {
+    // CR 603.2c: the caller stamps `batched` from the subject phrase. This shape
+    // is newly reachable via the parameterization, so its batching is pinned as
+    // known-and-accepted. It pins ONLY the flag — a `"that many"` resolution on a
+    // batched damage trigger would resolve to a subject headcount, which is a
+    // deferred, currently card-less hazard.
+    let def = parse_trigger_line(
+        "Whenever one or more creatures you control are dealt noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert!(def.batched);
+}
+
+#[test]
+fn dealt_damage_axes_excess_noncombat_unchanged() {
+    // CR 120.10: regression guard — a previously-covered excess cell is identical.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt excess noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ExcessDamageAll);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert_eq!(def.damage_amount, None);
+}
+
+#[test]
+fn dealt_damage_axes_combat_unchanged() {
+    // CR 510 + CR 120.2a: regression guard for the combat cell.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt combat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+}
+
+#[test]
+fn dealt_damage_axes_bare_unchanged() {
+    // Regression guard for the bare cell.
+    let def = parse_trigger_line("Whenever ~ is dealt damage, draw a card.", "Some Card");
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+}
+
+#[test]
+fn dealt_damage_excess_with_threshold_is_rejected() {
+    // CR 120.10: `ExcessDamageAll`'s matcher never reads `damage_amount`, so a
+    // threshold on the excess channel would be silently dropped. The combinator
+    // refuses instead, keeping the line honestly unsupported.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt excess 3 or more damage, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "excess + threshold must be refused at parse time, got {:?}",
+        def.mode
+    );
+
+    // Paired positive reach-guard: the excess channel itself is live, so the
+    // negative above cannot pass vacuously via a dead combinator.
+    let reachable = parse_trigger_line(
+        "Whenever ~ is dealt excess damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(reachable.mode, TriggerMode::ExcessDamageAll);
+}
+
+#[test]
+fn dealt_damage_newly_opened_cell_rejects_unmodeled_tail() {
+    // CR 603.2: an ability triggers when a game event matches ITS trigger event.
+    // Pain Magnification's "by a single source" is a per-source aggregation
+    // constraint the engine cannot represent, so on this NEWLY-OPENED cell the
+    // arm refuses the def rather than asserting a different (over-firing)
+    // trigger event. Verbatim Oracle text.
+    let def = parse_trigger_line(
+        "Whenever an opponent is dealt 3 or more damage by a single source, that player discards a card.",
+        "Pain Magnification",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unmodeled trailing restriction on a newly-opened cell must be refused, got {:?}",
+        def.mode
+    );
+
+    // Paired positive reach-guard — WITHOUT it the assertion above could pass
+    // vacuously, from the arm reaching no newly-opened cell at all. The control
+    // must therefore be a cell that is newly opened AND still emits: the
+    // noncombat/total cell, which no former `tag()` arm covered. It cannot be
+    // Innocent Bystander's `N or more` cell, which the amount guard now refuses
+    // for unmodelable whole-event aggregation (see `..._amount_threshold_is_refused`).
+    // Verbatim Oracle text.
+    let reachable = parse_trigger_line(
+        "Whenever Smaug is dealt noncombat damage, create that many Treasure tokens.",
+        "Smaug the Impenetrable",
+    );
+    assert_eq!(reachable.mode, TriggerMode::DamageReceived);
+    assert_eq!(reachable.damage_kind, DamageKindFilter::NoncombatOnly);
+}
+
+#[test]
+fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
+    // The honesty guard is AXIS-SCOPED, not blanket: a cell the former `tag()`
+    // arms already covered keeps its pre-existing behavior byte-identically.
+    // Chandra's Phoenix's dropped source restriction is a KNOWN PRE-EXISTING
+    // gap that predates the parameterization — recorded, not endorsed. Widening
+    // the guard to a blanket remainder check would regress this card (and,
+    // invisibly to coverage, Glyph of Life), so this test is the narrowness
+    // sentinel. Verbatim Oracle text.
+    let def = parse_trigger_line(
+        "Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand.",
+        "Chandra's Phoenix",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+    assert_eq!(def.damage_amount, None);
 }

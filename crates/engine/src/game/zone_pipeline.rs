@@ -146,6 +146,9 @@ pub struct EntryMods {
     /// pipeline carrier `ProposedEvent::ZoneChange.enter_tapped` and preserving
     /// the Unspecified-vs-Untapped distinction at the request boundary.
     pub enter_tapped: EtbTapState,
+    /// CR 508.4: A creature put onto the battlefield attacking joins combat
+    /// without being declared as an attacker.
+    pub enters_attacking: bool,
     /// CR 712.14a. Genuinely two-valued (enters showing back face or not) — no
     /// Unspecified third state to preserve, unlike `enter_tapped`.
     pub enter_transformed: bool,
@@ -228,6 +231,7 @@ impl ZoneMoveRequest {
             destination: self.to,
             cause,
             enter_tapped: self.mods.enter_tapped,
+            enters_attacking: self.mods.enters_attacking,
             enter_transformed: self.mods.enter_transformed,
             controller_override: self.mods.controller_override,
             enter_with_counters: self.mods.enter_with_counters,
@@ -271,6 +275,7 @@ impl ZoneMoveRequest {
             cause,
             mods: EntryMods {
                 enter_tapped: pending.enter_tapped,
+                enters_attacking: pending.enters_attacking,
                 enter_transformed: pending.enter_transformed,
                 controller_override: pending.controller_override,
                 enter_with_counters: pending.enter_with_counters,
@@ -978,6 +983,7 @@ pub(crate) fn move_object_with_terminal(
         if let ProposedEvent::ZoneChange {
             enter_transformed,
             enter_tapped,
+            enters_attacking,
             controller_override,
             enter_with_counters,
             face_down_profile,
@@ -989,6 +995,7 @@ pub(crate) fn move_object_with_terminal(
             if !req.mods.enter_tapped.is_unspecified() {
                 *enter_tapped = req.mods.enter_tapped;
             }
+            *enters_attacking = req.mods.enters_attacking;
             *controller_override = req.mods.controller_override;
             enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
             *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
@@ -1029,6 +1036,7 @@ pub(crate) fn move_object_with_terminal(
         exile_links.duration.as_ref(),
         req.mods.enter_transformed,
         req.mods.enter_tapped,
+        req.mods.enters_attacking,
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
@@ -1405,6 +1413,7 @@ fn anticipated_zone_change_delivery(
         ProposedEvent::zone_change(request.object_id, object.zone, request.to, request.source());
     if let ProposedEvent::ZoneChange {
         enter_tapped,
+        enters_attacking,
         enter_transformed,
         controller_override,
         enter_with_counters,
@@ -1415,6 +1424,7 @@ fn anticipated_zone_change_delivery(
     } = &mut expected_event
     {
         *enter_tapped = request.mods.enter_tapped;
+        *enters_attacking = request.mods.enters_attacking;
         *enter_transformed = request.mods.enter_transformed;
         *controller_override = request.mods.controller_override;
         *enter_with_counters = request.mods.enter_with_counters.clone();
@@ -1664,6 +1674,7 @@ fn append_zone_delivery_tail_after_counter_pause(
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
     drain: PostReplacementDrainOwner,
+    enters_attacking: bool,
     clear_pending_etb_counters: Option<ObjectId>,
 ) -> ZoneDeliveryResult {
     let mut actions = Vec::new();
@@ -1679,6 +1690,7 @@ fn append_zone_delivery_tail_after_counter_pause(
         duration: duration.cloned(),
         exile_tracking,
         drain,
+        enters_attacking,
     });
     crate::game::effects::counters::append_pending_counter_post_actions(state, actions);
     replacement_pause_delivery_result(state)
@@ -3270,6 +3282,7 @@ pub(crate) fn deliver_replaced_zone_change(
         attach_to,
         enter_transformed: should_transform,
         enter_tapped: should_tap,
+        enters_attacking,
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
@@ -3493,7 +3506,20 @@ pub(crate) fn deliver_replaced_zone_change(
                     crate::game::merge::put_component_into_zone(state, object_id, to, events);
                 } else {
                     took_plain_zone_transfer = true;
-                    zones::move_to_zone(state, object_id, to, events);
+                    // CR 712.14a: carry the effect-driven "enters transformed"
+                    // intent into the battlefield-entry guard so a non-permanent
+                    // FRONT face (e.g. instant/sorcery) may enter as its PERMANENT
+                    // back face. `should_transform` is destructured from
+                    // `ProposedEvent::ZoneChange.enter_transformed` above; the
+                    // flag is inert for any non-battlefield destination (the guard
+                    // gates on `to == Battlefield`).
+                    zones::move_to_zone_with_entry_flags(
+                        state,
+                        object_id,
+                        to,
+                        events,
+                        should_transform,
+                    );
                 }
             }
         }
@@ -3775,6 +3801,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     duration,
                     exile_tracking,
                     drain,
+                    enters_attacking,
                     pending_etb_cleanup,
                 );
             }
@@ -3806,11 +3833,12 @@ pub(crate) fn deliver_replaced_zone_change(
                     duration,
                     exile_tracking,
                     drain,
+                    enters_attacking,
                     None,
                 );
             }
         }
-        return apply_zone_delivery_tail(
+        let result = apply_zone_delivery_tail(
             state,
             object_id,
             from,
@@ -3823,6 +3851,19 @@ pub(crate) fn deliver_replaced_zone_change(
             library_placement.as_ref(),
             events,
         );
+        if matches!(result, ZoneDeliveryResult::Done) && enters_attacking && entered_battlefield {
+            let controller = state
+                .objects
+                .get(&object_id)
+                .map(|object| object.controller)
+                .expect("a settled battlefield entrant must exist");
+            if let Some(player) = crate::game::combat::choose_entry_attack_target_or_enter(
+                state, object_id, controller,
+            ) {
+                return ZoneDeliveryResult::NeedsChoice(player);
+            }
+        }
+        return result;
     }
     ZoneDeliveryResult::Done
 }
@@ -3830,6 +3871,7 @@ pub(crate) fn deliver_replaced_zone_change(
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
     match &state.waiting_for {
         WaitingFor::ReplacementChoice { player, .. }
+        | WaitingFor::EntryControllerChoice { player, .. }
         // CR 614.12a: a Devour as-enters sacrifice surfaced its own
         // `EffectZoneChoice`; carry its chooser so the caller's `park_waiting_for`
         // doesn't clobber the already-surfaced prompt.
@@ -3859,6 +3901,7 @@ pub(crate) fn execute_zone_move(
     duration: Option<&Duration>,
     enter_transformed: bool,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -3876,6 +3919,7 @@ pub(crate) fn execute_zone_move(
         duration,
         enter_transformed,
         enter_tapped,
+        enters_attacking,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -3897,6 +3941,7 @@ pub(crate) fn execute_zone_move_with_terminal(
     duration: Option<&Duration>,
     enter_transformed: bool,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -3914,6 +3959,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         duration,
         enter_transformed,
         enter_tapped,
+        enters_attacking,
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
@@ -3935,6 +3981,7 @@ fn execute_zone_move_with_applied_terminal(
     duration: Option<&Duration>,
     enter_transformed: bool,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -3993,6 +4040,16 @@ fn execute_zone_move_with_applied_terminal(
         } = proposed
         {
             *et = enter_tapped;
+        }
+    }
+
+    if enters_attacking {
+        if let ProposedEvent::ZoneChange {
+            enters_attacking: ref mut entering_attacking,
+            ..
+        } = proposed
+        {
+            *entering_attacking = true;
         }
     }
 
@@ -5895,6 +5952,170 @@ mod layers_incremental_flush_tests {
         assert_eq!(
             counters.layers_full_eval, 1,
             "the escalation must land in a full evaluation"
+        );
+    }
+}
+
+/// CR 712.14a building-block tests for the effect-driven transformed battlefield
+/// entry (Esper Origins class). Both drive `execute_zone_move_with_terminal`
+/// directly (not the raw `zones::move_to_zone`), so the full
+/// `deliver_replaced_zone_change` plain-fallback wiring — including the
+/// `move_to_zone_with_entry_flags(..., enter_transformed)` thread — is exercised.
+#[cfg(test)]
+mod effect_driven_transformed_entry_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::identifiers::CardId;
+
+    /// CR 712.14a (2nd sentence) regression guard: a SINGLE-FACED object
+    /// instructed to enter transformed cannot enter the battlefield — it remains
+    /// in its origin zone (Exile).
+    ///
+    /// This guards the PRE-EXISTING belt-and-suspenders early-return inside
+    /// `execute_zone_move_with_applied_terminal` (before the `zones.rs` SF1 guard
+    /// is reached). It passes both before and after the fix; its role is to pin
+    /// the CR 712.14a-2nd-sentence path against the SF1 guard rewrite ever being
+    /// regressed to a front-face fallback on the full-pipeline route.
+    #[test]
+    fn single_faced_object_instructed_enter_transformed_remains() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Single Faced".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // back_face intentionally left None (single-faced).
+        }
+
+        let mut events = Vec::new();
+        let result = execute_zone_move_with_terminal(
+            &mut state,
+            object_id,
+            Zone::Exile,
+            Zone::Battlefield,
+            object_id,
+            None,
+            true, // enter_transformed
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            &mut events,
+        );
+
+        assert!(
+            matches!(
+                result,
+                ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+            ),
+            "CR 712.14a 2nd sentence: a single-faced object instructed to enter \
+             transformed must remain"
+        );
+        assert_eq!(
+            state.objects[&object_id].zone,
+            Zone::Exile,
+            "the single-faced object must stay in Exile"
+        );
+    }
+
+    /// CR 712.14a CONTROL: a DFC with a PERMANENT front face (Creature) and a
+    /// PERMANENT back face (Land) instructed to enter transformed still lands in
+    /// Battlefield and ends up transformed. Passes before and after the fix — the
+    /// entry-face rewrite must not be front-regressive, and `transform_permanent`
+    /// must still fire after the guarded entry.
+    #[test]
+    fn mdfc_permanent_front_transformed_entry_still_lands() {
+        use crate::game::game_object::BackFaceData;
+
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "MDFC Front".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: "MDFC Back".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: None,
+                printed_loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: None,
+                parse_warnings: vec![],
+            });
+        }
+
+        let mut events = Vec::new();
+        let result = execute_zone_move_with_terminal(
+            &mut state,
+            object_id,
+            Zone::Exile,
+            Zone::Battlefield,
+            object_id,
+            None,
+            true, // enter_transformed
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            &mut events,
+        );
+
+        assert!(
+            matches!(result, ZoneMoveTerminalResult::Completed(_)),
+            "the DFC entered the battlefield and completed the move"
+        );
+        let obj = state.objects.get(&object_id).unwrap();
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "a permanent-front DFC entering transformed must land on the battlefield"
+        );
+        assert!(
+            obj.transformed,
+            "CR 712.14a: the DFC must be transformed (back face) after this entry"
         );
     }
 }

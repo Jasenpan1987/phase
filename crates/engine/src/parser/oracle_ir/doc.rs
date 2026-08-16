@@ -1475,7 +1475,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Investigate => {}
         Effect::Tribute { .. } => {}
         Effect::TimeTravel => {}
-        Effect::BecomeMonarch => {}
+        Effect::BecomeMonarch { .. } => {}
         Effect::NoOp => {}
         Effect::Proliferate => {}
         Effect::ProliferateTarget { .. } => {}
@@ -1528,6 +1528,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Choose { .. } => {}
         Effect::OpponentGuess { .. } => {}
         Effect::SwapChosenLabels { .. } => {}
+        Effect::RevealChosenNumbers { .. } => {}
         Effect::ChooseDamageSource { .. } => {}
         Effect::Suspect { .. } => {}
         Effect::Unsuspect { .. } => {}

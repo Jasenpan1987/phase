@@ -2462,6 +2462,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 target,
                 enters_under: enters_under.as_controller_ref(),
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking: false,
                 // CR 122.1 + CR 122.1h: each returned object enters with these
                 // counters (e.g. a finality counter on Shilgengar's mass return).
                 enter_with_counters,
@@ -2696,6 +2697,13 @@ fn parse_zone_word(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
 /// union. Named so the inner `nom` combinator signature stays under
 /// `clippy::type_complexity`.
 type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, Vec<Zone>));
+
+/// CR 508.1d + CR 506.3: result of the defender-bound "attack(s) `<defender>`
+/// [window] if able" parse — the required defender plus the window it states for
+/// itself. `None` is the WINDOWLESS form ("attack ~ if able" — Gideon Jura),
+/// whose span comes from an enclosing clause instead.
+type DefenderBoundAttackParse<'a> =
+    Result<(&'a str, (TargetFilter, Option<Duration>)), nom::Err<OracleError<'a>>>;
 
 /// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
 /// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
@@ -3385,6 +3393,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         SearchCreationImperativeAst::ExileTopLookedAt {
@@ -3469,6 +3478,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             ])),
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
@@ -4067,7 +4077,17 @@ pub(super) fn parse_choose_ast(
         }
     }
 
-    if let Some(choice_type) = super::try_parse_named_choice(lower) {
+    // CR 107.1a/b: a "with the highest number" restriction on an opponent choice
+    // only means the secretly-chosen number when this ability actually made one.
+    // `pending_choice_type` is the chunk-loop-threaded record of the last
+    // `Effect::Choose` domain, the same provenance the quantity path gates on.
+    let has_number_choice = matches!(
+        ctx.pending_choice_type,
+        Some(crate::types::ability::ChoiceType::NumberRange { .. })
+    );
+    if let Some(choice_type) =
+        super::try_parse_named_choice_with_provenance(lower, has_number_choice)
+    {
         // CR 608.2d (override) + CR 701.9b (analogous): "choose a player at
         // random" (Strax) — the game selects the referent, not the controller.
         let selection = if nom_primitives::scan_contains(lower, "at random") {
@@ -4718,6 +4738,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
         },
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
         enter_with_counters: vec![],
         face_down_profile: None,
         library_position: None,
@@ -6000,12 +6021,12 @@ fn attach_neuter_recipient_resolves_via_subject(ctx: &ParseContext) -> bool {
     }
 }
 
+/// CR 201.5 + CR 109.5: the attach path's whole-phrase form of the shared
+/// source-anaphoric gendered pronoun recognizer. Delegates to the single
+/// authority (`oracle_target::parse_source_anaphoric_pronoun`) under
+/// `all_consuming` — an attach recipient is the pronoun and nothing else.
 fn parse_gendered_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
-    all_consuming(alt((
-        |i| parse_word_bounded(i, "her"),
-        |i| parse_word_bounded(i, "him"),
-    )))
-    .parse(input)
+    all_consuming(crate::parser::oracle_target::parse_source_anaphoric_pronoun).parse(input)
 }
 
 fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
@@ -6203,6 +6224,16 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 /// dealt by those creatures") so both prevent-recipient parsers agree.
 ///
 /// Tries, in priority order:
+/// 0. A source-anaphoric gendered pronoun ("him"/"her"/"himself"/"herself") →
+///    `SelfRef`, UNGATED (CR 201.5 + CR 109.5). Magic templating uses a
+///    gendered pronoun only as the printed-name self-reference, so unlike the
+///    neuter "it" it needs no `parent_target_available` gate. This tier must
+///    run FIRST: with the gate closed, tier 1 declines and tier 2's
+///    `is_broadcast_population_filter` check rejects `SelfRef`, so without it
+///    "prevent all damage that would be dealt to him this turn" (Gideon Jura,
+///    Gideon of the Trials) fell through to the `Any` default — a shield with
+///    NO recipient constraint, i.e. a turn-long Fog over every damage event in
+///    the game rather than a shield on the Gideon.
 /// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
 ///    gated on `parent_target_available` (CR 608.2c, issue #1094).
 /// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
@@ -6226,6 +6257,12 @@ pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
 ) -> Option<TargetFilter> {
+    // CR 201.5 + CR 109.5: tier 0 — the ungated printed-name self-reference.
+    if let Some((filter, _)) =
+        crate::parser::oracle_target::parse_source_anaphoric_pronoun_ref(recipient.original)
+    {
+        return Some(filter);
+    }
     if let Some((filter, _)) =
         parse_anaphoric_target_ref(recipient.original, parent_target_available)
     {
@@ -7067,6 +7104,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 target,
                 enters_under: enters_under.as_controller_ref(),
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position,
@@ -7139,6 +7177,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     // for them — identical to the prior hardcoded default.
                     enters_under,
                     enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -7226,6 +7265,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target: TargetFilter::Controller,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: Some(position),
@@ -7843,6 +7883,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                     target,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -8154,6 +8195,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
         enter_with_counters: vec![],
         face_down_profile: None,
         library_position: None,
@@ -8943,7 +8985,7 @@ pub(super) fn parse_exile_ast(
     // Excise the consumed clause so the debug-only compound-remainder assert
     // below does not flag it.
     let rem_lower = rem.to_ascii_lowercase();
-    let (mut enter_with_counters, counters_offset) =
+    let (mut enter_with_counters, counters_span) =
         super::parse_with_counters_suffix_spanned(&rem_lower);
     // CR 122.2 + CR 702.62a: Adopt the counters lifted off a counterless-origin
     // descriptive target above (Doom's Time Platform) when the post-target
@@ -8962,7 +9004,7 @@ pub(super) fn parse_exile_ast(
     // carry a "with N counters" FILTER — that reading only applies to
     // descriptive targets like "exile each creature with a +1/+1 counter on
     // it"), recover the enter-with-counters suffix from the full clause. The
-    // `rem` is already empty in this case, so `counters_offset` stays `None`.
+    // `rem` is already empty in this case, so `counters_span` stays `None`.
     if enter_with_counters.is_empty()
         && matches!(
             parsed_target,
@@ -8972,12 +9014,19 @@ pub(super) fn parse_exile_ast(
         let rest_lower_full = rest_text.to_ascii_lowercase();
         enter_with_counters = super::parse_with_counters_suffix(&rest_lower_full);
     }
-    let _rem = match counters_offset {
-        Some(off) => &rem[..off],
-        None => rem,
+    // Excise ONLY the counter clause's span and check BOTH sides. Truncating at
+    // the span's start (as this did before) hid any compound instruction printed
+    // after the rider from the very assert whose job is to catch silent
+    // remainder drops.
+    let (_rem_head, _rem_tail) = match &counters_span {
+        Some(span) => (&rem[..span.start], &rem[span.end..]),
+        None => (rem, ""),
     };
     #[cfg(debug_assertions)]
-    assert_no_compound_remainder(_rem, text);
+    {
+        assert_no_compound_remainder(_rem_head, text);
+        assert_no_compound_remainder(_rem_tail, text);
+    }
     // CR 701.5a: "exile target spell" must constrain targeting to the stack,
     // mirroring parse_counter_ast at line 1218-1219.
     let target = if nom_primitives::scan_contains(rest_lower, "spell") {
@@ -12293,6 +12342,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 target,
                 enters_under,
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 // CR 401.4: `library_position` is the PRIMARY move's own
@@ -12307,6 +12357,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 target: rest_target,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 // CR 401.4: the "rest" pile's bottom/top position and randomness.
@@ -12895,11 +12946,20 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::ForceAttack {
             duration,
-            required_player,
+            required_defender,
         } => Effect::ForceAttack {
             target: TargetFilter::Any,
-            required_player,
-            duration,
+            required_defender,
+            // CR 115.1: the imperative path is the TARGETED form ("Target
+            // creature attacks you this combat if able"); subject injection
+            // fills `target` from the declared target phrase.
+            scope: EffectScope::Single,
+            // CR 611.2a: a windowless predicate ("attack ~ if able") states no
+            // span of its own — its window comes from the enclosing clause, which
+            // the clause machinery re-stamps onto this effect. The `UntilEndOfTurn`
+            // fallback is the pre-existing default for a stated-window-free grant
+            // and is never the value a windowless Gideon-Jura-class clause keeps.
+            duration: duration.unwrap_or(Duration::UntilEndOfTurn),
         },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
         ImperativeFamilyAst::Goad => Effect::Goad {
@@ -12985,7 +13045,13 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             profile,
             multi_target: _,
         } => Effect::TurnFaceDown { target, profile },
-        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
+        // CR 109.5: a bare "become the monarch" imperative has no printed
+        // subject, so the subject is "you". The targeted form
+        // ("target opponent becomes the monarch") carries an explicit subject
+        // phrase and is lowered by `subject::build_become_clause` instead.
+        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        },
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
@@ -13500,6 +13566,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -13730,11 +13797,16 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
     Some(Effect::Adapt { count })
 }
 
-/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" requirements.
+/// CR 508.1d: Parse "attacks/attack [defender] [window] if able" requirements.
 ///
 /// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
-/// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
-/// "you" to the resolving ability controller and grants `MustAttackPlayer`.
+/// Defender-bound forms ("attacks you …", "attack ~ if able") emit
+/// `ForceAttack`, whose resolver binds the referent and grants
+/// `MustAttackDefender`.
+///
+/// CR 506.3 makes the defender axis one category — "a player, a planeswalker, or
+/// a battle" — so the player arms and the source-permanent arm are alternatives
+/// on a single `alt()`, not separate parsers.
 pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
@@ -13779,7 +13851,7 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
         }));
     }
 
-    let targeted: Result<(&str, (TargetFilter, Duration)), nom::Err<OracleError<'_>>> = (
+    let targeted: DefenderBoundAttackParse<'_> = (
         alt((tag("attacks"), tag("attack"))),
         preceded(
             tag(" "),
@@ -13792,6 +13864,12 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
             // (read from chosen_players) is the correct reference, not the
             // durable SourceChosenPlayer. The opponent choice is the single
             // preceding choice in every card of this class, so index 0.
+            // CR 506.3: one defender axis covering both permitted referent
+            // kinds. The player arms bind a player; the `~` arm binds the
+            // ability's own source permanent (Gideon Jura: "creatures that
+            // player controls attack Gideon Jura if able", where the printed
+            // name has already been normalized to `~`). `force_attack::resolve`
+            // is the single place that classifies which kind a filter denotes.
             alt((
                 value(TargetFilter::Controller, tag("you")),
                 value(
@@ -13800,31 +13878,38 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
                     ),
                     tag("that player"),
                 ),
+                value(TargetFilter::SelfRef, tag("~")),
             )),
         ),
+        // CR 508.1d + CR 611.2a: the window axis. `None` is the WINDOWLESS form
+        // ("attack ~ if able"), whose span is stated by an enclosing clause
+        // instead — Gideon Jura's leading "During target opponent's next turn,".
+        // The enclosing duration reaches this effect through the clause
+        // machinery, so a windowless match must not invent one here.
         preceded(
             tag(" "),
             alt((
-                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(Some(Duration::UntilEndOfTurn), tag("this turn if able")),
                 value(
-                    Duration::UntilEndOfCombat,
+                    Some(Duration::UntilEndOfCombat),
                     alt((
                         tag("this combat if able"),
                         tag("that combat if able"),
                         tag("each combat if able"),
                     )),
                 ),
+                value(None, tag("if able")),
             )),
         ),
     )
-        .map(|(_, required_player, duration)| (required_player, duration))
+        .map(|(_, required_defender, duration)| (required_defender, duration))
         .parse(trimmed);
 
-    if let Ok((rest, (required_player, duration))) = targeted {
+    if let Ok((rest, (required_defender, duration))) = targeted {
         if rest.is_empty() {
             return Some(ImperativeFamilyAst::ForceAttack {
                 duration,
-                required_player,
+                required_defender,
             });
         }
     }
@@ -13951,7 +14036,7 @@ pub(super) fn must_attack_away_static_definition() -> StaticDefinition {
     use crate::types::statics::StaticMode;
     // DELIBERATE GAP (plan §5.9): keying `mode` on the away-from requirement also
     // excludes this def from `is_mass_coerce_static` (oracle_effect/mod.rs), which
-    // publishes the chain tracked set only for `MustAttack`/`MustAttackPlayer`. A
+    // publishes the chain tracked set only for `MustAttack`/`MustAttackDefender`. A
     // future card printing this compound followed by a "those creatures" anaphor
     // (CR 608.2c) would therefore not publish the set, unlike the plain-`MustAttack`
     // sibling above. Unreachable today and not a regression: neither card-data key
@@ -16620,6 +16705,7 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 enters_under: None,
                 enter_tapped,
+                enters_attacking: false,
                 enter_with_counters: _,
                 face_down_profile: None,
                 library_position: None,
@@ -19417,10 +19503,10 @@ mod tests {
         match result.unwrap() {
             ImperativeFamilyAst::ForceAttack {
                 duration,
-                required_player,
+                required_defender,
             } => {
-                assert_eq!(duration, Duration::UntilEndOfCombat);
-                assert_eq!(required_player, TargetFilter::Controller);
+                assert_eq!(duration, Some(Duration::UntilEndOfCombat));
+                assert_eq!(required_defender, TargetFilter::Controller);
             }
             other => panic!("Expected ForceAttack, got {other:?}"),
         }
@@ -19436,13 +19522,13 @@ mod tests {
         match result {
             ImperativeFamilyAst::ForceAttack {
                 duration,
-                required_player,
+                required_defender,
             } => {
-                assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(duration, Some(Duration::UntilEndOfCombat));
                 assert_eq!(
-                    required_player.chosen_player_index(),
+                    required_defender.chosen_player_index(),
                     Some(0),
-                    "that player must reference the chosen player at index 0, got {required_player:?}"
+                    "that player must reference the chosen player at index 0, got {required_defender:?}"
                 );
             }
             other => panic!("Expected ForceAttack, got {other:?}"),
@@ -19490,18 +19576,23 @@ mod tests {
         // resolution-scoped chosen opponent (chosen_players[0]).
         let Effect::ForceAttack {
             target,
-            required_player,
+            required_defender,
             duration,
+            scope,
         } = &*sub.effect
         else {
             panic!("sub-ability must be a ForceAttack, got {:?}", sub.effect);
         };
         assert_eq!(*target, TargetFilter::SelfRef);
         assert_eq!(*duration, Duration::UntilEndOfCombat);
+        // CR 115.1: `~` names ONE object, so this subject is not a broadcast
+        // population — the scope must stay `Single` (only Gideon-Jura-class
+        // "creatures that player controls" subjects reach `All`).
+        assert_eq!(*scope, EffectScope::Single);
         assert_eq!(
-            required_player.chosen_player_index(),
+            required_defender.chosen_player_index(),
             Some(0),
-            "must force attacking the chosen player, got {required_player:?}"
+            "must force attacking the chosen player, got {required_defender:?}"
         );
     }
 

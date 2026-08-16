@@ -7,10 +7,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
     ControllerRef, CopyRetargetPermission, DamageKindFilter, DelayedTriggerCondition, Effect,
-    ModalChoice, ObjectScope, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RenownSubject, ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    FilterProp, ModalChoice, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};

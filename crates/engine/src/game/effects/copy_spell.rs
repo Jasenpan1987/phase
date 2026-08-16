@@ -497,7 +497,10 @@ fn resolve_copier_player(
         | ControllerRef::EnchantedPlayer
         // CR 102.1: no card scopes "the active player copies this spell";
         // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
-        | ControllerRef::ActivePlayer => None,
+        | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: no card scopes a copier to a snapshotted player;
+        // the lowering exists only for combat-requirement continuous effects.
+        | ControllerRef::SpecificPlayer { .. } => None,
     }
 }
 
@@ -2043,6 +2046,7 @@ mod tests {
             card_id: CardId(1),
             object_id: cast_spell_id,
             controller: PlayerId(0),
+            cast_mana_value: None,
         });
 
         let copy_ability = ResolvedAbility::new(
@@ -2144,6 +2148,7 @@ mod tests {
                 card_id: CardId(1),
                 object_id: cast_spell_id,
                 controller: PlayerId(0),
+                cast_mana_value: None,
             }),
         );
 
@@ -3360,6 +3365,7 @@ mod tests {
             card_id: CardId(1),
             object_id: ObjectId(10),
             controller: PlayerId(0),
+            cast_mana_value: None,
         });
         let mut events = Vec::new();
         resolve(&mut state, &copy, &mut events).expect("automatic copy must resolve");

@@ -517,6 +517,7 @@ fn random_card_predicate_guess(
     use rand::seq::IndexedRandom;
 
     let WaitingFor::NamedChoice {
+        free_entry: _,
         player,
         choice_type,
         options,
@@ -1333,7 +1334,8 @@ pub fn fallback_action(
                 source_id: choice.source_id,
                 partner_id: choice.partner_id,
             }),
-        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. }
+        | WaitingFor::EntryAttackTargetChoice { valid_targets, .. } => valid_targets
             .first()
             .copied()
             .map(|target| GameAction::ChooseEntryAttackTarget { target }),
@@ -1536,6 +1538,10 @@ pub fn fallback_action(
 
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
+        WaitingFor::EntryControllerChoice { candidates, .. } => candidates
+            .first()
+            .copied()
+            .map(|opponent| GameAction::ChooseEntryController { opponent }),
 
         // Trigger order: keep the engine-provided order.
         WaitingFor::OrderTriggers { triggers, .. } => Some(GameAction::OrderTriggers {
@@ -5251,6 +5257,7 @@ mod tests {
                 per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
+            declaration: None,
         };
 
         assert_eq!(
@@ -9316,6 +9323,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -9415,6 +9423,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicate {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -9452,6 +9461,7 @@ mod tests {
         );
         state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -9471,6 +9481,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = vec!["Forest".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: P0,
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -9503,6 +9514,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = Vec::new().into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -11838,6 +11850,7 @@ mod tests {
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -11963,6 +11976,7 @@ mod tests {
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             }
         });
         push("SurveilChoice", &|state| WaitingFor::SurveilChoice {
@@ -12218,6 +12232,7 @@ mod tests {
             Zone::Battlefield,
         );
         guess.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
