@@ -10596,6 +10596,7 @@ fn collect_matching_delayed_triggers(
     // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
     let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent, bool)> = Vec::new();
     let mut to_remove: Vec<(usize, usize, GameEvent)> = Vec::new();
+    let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
@@ -10708,12 +10709,22 @@ fn collect_matching_delayed_triggers(
         .iter()
         .map(|(idx, event_index, event)| (*idx, (*event_index, event.clone())))
         .collect();
-    let mut combined: Vec<usize> = to_remove.iter().map(|(idx, _, _)| *idx).collect();
+    let mut unfired_dispositions: std::collections::HashMap<
+        usize,
+        super::lifecycle::DelayedTerminalDisposition,
+    > = to_discard.iter().copied().collect();
+    let mut combined: Vec<usize> = to_remove
+        .iter()
+        .map(|(idx, _, _)| *idx)
+        .chain(to_discard.iter().map(|(idx, _)| *idx))
+        .collect();
     combined.sort_unstable();
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
         if let Some((event_index, trigger_event)) = fired_events.remove(&idx) {
             to_fire.push((trigger, event_index, trigger_event, true));
+        } else if let Some(disposition) = unfired_dispositions.remove(&idx) {
+            super::lifecycle::record_delayed_terminal(trigger.provenance.firing(), disposition);
         }
     }
 

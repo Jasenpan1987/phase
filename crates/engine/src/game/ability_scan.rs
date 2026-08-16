@@ -264,7 +264,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
         sibling_condition: _,     // SiblingCondition replication marker, no dynamic read
-        distribute: _,             // announcement unit tag/string, no resolution-time dynamic read
+        distribute: _,            // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 

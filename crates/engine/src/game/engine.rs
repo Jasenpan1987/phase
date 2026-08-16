@@ -18163,7 +18163,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            40,
+            42,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one): adjudicate it in this doc and \
@@ -18192,10 +18192,9 @@ mod stage2_injector_tests {
         // partition assert below before this total could absorb it.
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 7, 28),
-            "the partition, not just the total: five PRODUCTION producers, seven PRODUCTION \
-             readers (they read `state.waiting_for` and never write it — the seventh is U4's \
-             `inject_pinned_answer` arm), 28 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+            (5, 8, 29),
+            "the partition, not just the total: five PRODUCTION producers, eight PRODUCTION \
+             readers (they read `state.waiting_for` and never write it), 29 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
@@ -18674,9 +18673,9 @@ mod stage2_injector_tests {
                 // trust looks like — and it is why the two prose entries are BOTH kept
                 // rather than one overwriting the other: they are separate witnesses, not
                 // duplicates.
-                "game/effects/mod.rs:6774".to_string(),
-                "game/effects/mod.rs:6851".to_string(),
-                "game/effects/mod.rs:10089".to_string(),
+                "game/effects/mod.rs:6922".to_string(),
+                "game/effects/mod.rs:6999".to_string(),
+                "game/effects/mod.rs:10237".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -19362,7 +19361,7 @@ mod stage2_injector_tests {
                 //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
                 //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
                 //   control that caught this row's one historical SILENT drift.
-                "game/engine.rs:12796".to_string(),
+                "game/engine.rs:12851".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
