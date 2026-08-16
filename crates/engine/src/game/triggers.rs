@@ -8624,7 +8624,7 @@ pub(crate) fn finish_accepted_triggered_mana_action(
         // A tail member paused and installed its own carrier naming the same
         // outer continuation; that carrier is the authority now.
         return Ok(TriggeredManaReadiness::Resumed {
-            wait: state.waiting_for.clone(),
+            wait: Box::new(state.waiting_for.clone()),
             settled_direct_priority_root: false,
         });
     }
@@ -8650,7 +8650,7 @@ pub(crate) fn finish_accepted_triggered_mana_action(
         && !super::casting::mana_ability_cost_payment_is_paused(state)
         && resolution_completion_can_settle(state);
     Ok(TriggeredManaReadiness::Resumed {
-        wait,
+        wait: Box::new(wait),
         settled_direct_priority_root,
     })
 }
@@ -8670,7 +8670,7 @@ pub(crate) enum TriggeredManaReadiness {
     /// `run_post_action_pipeline_from_settled_priority`; every other owner
     /// returns `wait` unchanged.
     Resumed {
-        wait: WaitingFor,
+        wait: Box<WaitingFor>,
         settled_direct_priority_root: bool,
     },
 }

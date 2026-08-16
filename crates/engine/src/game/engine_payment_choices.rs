@@ -50,6 +50,7 @@ pub(super) fn handle_optional_effect_choice(
     {
         // This arm falls through to the reducer's ordinary epilogue, which owns
         // release for the resumed frame; no settled-Priority convergence here.
+        let wait = *wait;
         state.waiting_for = wait.clone();
         return Ok(wait);
     }
@@ -219,6 +220,7 @@ pub(super) fn handle_opponent_may_choice(
         // its own frame's settled batch would sit undrained until some later
         // action — that is exactly the gap the settled wrapper closes. Every
         // other owner keeps its queue and returns the frame's wait unchanged.
+        let wait = *wait;
         let wait = if settled_direct_priority_root {
             engine_priority::run_post_action_pipeline_from_settled_priority(
                 state,
