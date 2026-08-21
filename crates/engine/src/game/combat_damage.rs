@@ -167,7 +167,7 @@ pub fn resolve_combat_damage(
             // sub-step flags are deliberately NOT set here — the resume sets them
             // once the batch actually completes, so neither re-entry nor
             // priority.rs's completeness gate can skip the rest of combat damage.
-            CombatDamageBatch::Paused { waiting_for, .. } => return Some(waiting_for),
+            CombatDamageBatch::Paused { waiting_for, .. } => return Some(*waiting_for),
             CombatDamageBatch::Complete(damage_events) => {
                 if let Some(wf) = finish_combat_damage_sub_step(
                     state,
@@ -192,7 +192,7 @@ pub fn resolve_combat_damage(
     match batch {
         // CR 616.1: see the first-strike arm above — the completion flags belong
         // to the resume, not to a batch that has parked.
-        CombatDamageBatch::Paused { waiting_for, .. } => Some(waiting_for),
+        CombatDamageBatch::Paused { waiting_for, .. } => Some(*waiting_for),
         CombatDamageBatch::Complete(damage_events) => finish_combat_damage_sub_step(
             state,
             CombatDamageSubStep::Regular,
@@ -333,7 +333,7 @@ pub(crate) fn resume_pending_combat_lifelink(
             // still-untouched tail was re-parked with the batch so far, so the
             // eventual completion still fires ONE CR 603.3b batch.
             events.extend_from_slice(&batch[owed_from..]);
-            Some(waiting_for)
+            Some(*waiting_for)
         }
         CombatDamageBatch::Complete(damage_events) => {
             events.extend_from_slice(&damage_events[owed_from..]);
@@ -1463,7 +1463,10 @@ pub(crate) enum CombatDamageBatch {
     /// paused source's own `LifeGain` and is the resume's authority.
     Paused {
         events: Vec<GameEvent>,
-        waiting_for: WaitingFor,
+        /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
+        /// inline field would make every `Complete` return pay the pause's size
+        /// (`clippy::large_enum_variant`).
+        waiting_for: Box<WaitingFor>,
     },
 }
 
@@ -1729,7 +1732,7 @@ fn drain_combat_lifelink(
                 state.pending_combat_lifelink = Some(Box::new(record));
                 return CombatDamageBatch::Paused {
                     events,
-                    waiting_for,
+                    waiting_for: Box::new(waiting_for),
                 };
             }
             // CR 614.6 + CR 614.1: a cross-event substitute (Lich class) already
