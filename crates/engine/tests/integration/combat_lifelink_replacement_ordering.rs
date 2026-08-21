@@ -600,9 +600,14 @@ fn life_gain_trigger_joins_the_combat_damage_trigger_batch() {
     // +1/+1 counter. The count is DERIVED from those rules, not tuned to output.
     //
     // `==`, never `>=`: a `>=` here cannot distinguish one fire from two, and a
-    // double fire is a live residual on this seam (a single-observer board with a
-    // CR 616.1 pause measures 2 — tracked as a follow-up). An assertion
-    // nominated to guard "exactly once" must be able to fail in BOTH directions.
+    // double fire is a live residual on this seam. An assertion nominated to
+    // guard "exactly once" must be able to fail in BOTH directions.
+    //
+    // Why THIS board still reads 1: two same-controller observers settle the
+    // answering action to `OrderTriggers`, and the post-action re-scan is gated
+    // on a `Priority` settle, so the re-scan never runs. The residual is
+    // therefore invisible here — see the unpaused row at the bottom of this file
+    // for the boundary it pins.
     let pridemate_counters: u32 = runner
         .state()
         .objects
@@ -1645,11 +1650,16 @@ fn combat_batch_observers_reach_the_stack_once_as_one_group() {
 /// once. No competing replacements, so no CR 616.1 choice is raised and the batch
 /// never parks.
 ///
-/// This is the correct-behaviour half of a known asymmetry. The same board WITH a
-/// CR 616.1 pause measures 2, a live CR 119.9 violation tracked as a follow-up
-/// (see docs/plans/R1-duplicate-life-gain-trigger.md). Keeping this row green
-/// pins the boundary: the double fire is specific to the pause/resume path and is
-/// NOT intrinsic to the combat-damage batch.
+/// This is the correct-behaviour half of a known asymmetry, and pinning it is the
+/// point. Adding two competing life-gain replacements to THIS board — so the gain
+/// parks on a CR 616.1 choice — measures 2, a live CR 119.9 violation: on a
+/// single-observer board the answer settles to `Priority`, which opens the
+/// post-action re-scan and fires the observer a second time off the resume tail.
+/// That defect is PRE-EXISTING (it measures 2 both before and after the gating
+/// change) and is tracked separately; no fixture pins it here, because a red
+/// fixture cannot ship. Keeping THIS row green pins the boundary the defect does
+/// not cross: the double fire belongs to the pause/resume path and is NOT
+/// intrinsic to the combat-damage batch.
 #[test]
 fn single_observer_gain_receipt_fires_once_without_a_pause() {
     let mut scenario = GameScenario::new();
