@@ -7358,8 +7358,19 @@ async fn handle_client_message(
                 return;
             };
 
-            let terminal = {
-                let mgr = state.lock().await;
+            // Removing a started session is the in-memory terminal commit. It
+            // happens under the same authority transaction as the host check,
+            // before terminal persistence performs database I/O. A reconnect
+            // that arrives after this point therefore cannot replace the
+            // committing socket and then observe a database-retired runtime.
+            enum AbandonCommit {
+                Terminal(persistence::FullTerminalArtifact, GameSession),
+                Unstarted,
+                Missing,
+            }
+
+            let commit = {
+                let mut mgr = state.lock().await;
                 if !full_socket_is_current_while_state_locked(&mgr, connections, identity, tx).await
                 {
                     drop(mgr);
@@ -7372,38 +7383,61 @@ async fn handle_client_message(
                 match mgr.sessions.get(&game_code) {
                     Some(session) if session.game_started => {
                         match terminal_artifact(session, None, "Game abandoned".to_string(), None) {
-                            Ok(artifact) => Some(artifact),
+                            Ok(artifact) => {
+                                let removed = mgr
+                                    .remove_game(&game_code)
+                                    .expect("started session was present while committing abandon");
+                                AbandonCommit::Terminal(artifact, removed)
+                            }
                             Err(error) => {
                                 let _ = tx.send(ServerMessage::error(error));
                                 return;
                             }
                         }
                     }
-                    Some(_) => None,
-                    None => {
-                        let msg = ServerMessage::GameAbandoned {
-                            game_code: game_code.clone(),
-                        };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
-                        return;
-                    }
+                    Some(_) => AbandonCommit::Unstarted,
+                    None => AbandonCommit::Missing,
                 }
             };
-            let terminal_deliveries = match terminal {
-                Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
-                    Ok(deliveries) => deliveries,
-                    Err(error) => {
-                        error!(game = %game_code, %error, "terminal preparation failed");
-                        let _ = tx.send(ServerMessage::error(error));
-                        return;
+            let (terminal_deliveries, committed_started_session) = match commit {
+                AbandonCommit::Terminal(artifact, removed) => {
+                    let deliveries = match prepare_full_terminal(game_db, artifact).await {
+                        Ok(deliveries) => deliveries,
+                        Err(error) => {
+                            let recovered = {
+                                let mut mgr = state.lock().await;
+                                if mgr.sessions.contains_key(&game_code) {
+                                    false
+                                } else {
+                                    mgr.restore_session(removed);
+                                    true
+                                }
+                            };
+                            error!(game = %game_code, %error, "terminal preparation failed");
+                            if !recovered {
+                                error!(game = %game_code, "terminal preparation recovery found a replacement session");
+                            }
+                            let _ = tx.send(ServerMessage::error(error));
+                            return;
+                        }
+                    };
+                    (deliveries, true)
+                }
+                AbandonCommit::Unstarted => (Vec::new(), false),
+                AbandonCommit::Missing => {
+                    let msg = ServerMessage::GameAbandoned {
+                        game_code: game_code.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
                     }
-                },
-                None => Vec::new(),
+                    return;
+                }
             };
 
-            let removed = {
+            let removed = if committed_started_session {
+                None
+            } else {
                 let mut mgr = state.lock().await;
                 if !full_socket_is_current_while_state_locked(&mgr, connections, identity, tx).await
                 {
@@ -7421,15 +7455,25 @@ async fn handle_client_message(
             }
 
             if !terminal_deliveries.is_empty() {
-                let conns = connections.lock().await;
-                if let Some(players) = conns.get(&game_code) {
-                    for (player, delivery) in &terminal_deliveries {
-                        if let Some(sender) = players.get(player) {
-                            let _ = sender.send(ServerMessage::TerminalResult {
-                                delivery: Some(delivery.clone()),
-                            });
+                let terminal_sends = {
+                    let conns = connections.lock().await;
+                    let mut sends = Vec::new();
+                    if let Some(players) = conns.get(&game_code) {
+                        for (player, delivery) in &terminal_deliveries {
+                            if let Some(sender) = players.get(player) {
+                                sends.push((
+                                    sender.clone(),
+                                    ServerMessage::TerminalResult {
+                                        delivery: Some(delivery.clone()),
+                                    },
+                                ));
+                            }
                         }
                     }
+                    sends
+                };
+                for (sender, message) in terminal_sends {
+                    let _ = sender.send(message);
                 }
             }
 
@@ -10375,8 +10419,12 @@ mod issue_4548_full_create_tests {
         }
     }
 
-    pub(super) async fn spawn_full_mode_server(
-    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+    pub(super) async fn spawn_full_mode_server() -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        SharedGameDb,
+    ) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let game_db = Arc::new(
             persistence::GameDb::open(
@@ -10396,7 +10444,7 @@ mod issue_4548_full_create_tests {
                 lobby: Arc::new(Mutex::new(Broker::new())),
                 lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
                 player_count: Arc::new(AtomicU32::new(0)),
-                game_db,
+                game_db: game_db.clone(),
                 draft_spectators: Arc::new(Mutex::new(HashMap::new())),
                 game_spectators: Arc::new(Mutex::new(HashMap::new())),
                 mode: ServerMode::Full,
@@ -10412,7 +10460,7 @@ mod issue_4548_full_create_tests {
             axum::serve(listener, app).await.expect("test server");
         });
 
-        (format!("ws://{addr}/ws"), handle, temp_dir)
+        (format!("ws://{addr}/ws"), handle, temp_dir, game_db)
     }
 
     pub(super) async fn recv_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
@@ -10432,7 +10480,7 @@ mod issue_4548_full_create_tests {
 
     #[tokio::test]
     async fn full_mode_create_sends_slots_after_game_created() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
             let (mut socket, _) = tokio_tungstenite::connect_async(url)
                 .await
@@ -10508,7 +10556,7 @@ mod issue_4548_full_create_tests {
 
     #[tokio::test]
     async fn full_mode_create_rejects_format_invalid_host_deck() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
             let (mut socket, _) = tokio_tungstenite::connect_async(url)
                 .await
@@ -10574,7 +10622,7 @@ mod issue_4548_full_create_tests {
 
     #[tokio::test]
     async fn full_mode_accepts_native_multi_ai_setup_larger_than_eight_kib() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(2), async {
             let (mut socket, _) = tokio_tungstenite::connect_async(url)
                 .await
@@ -10671,7 +10719,7 @@ mod game_submission_tests {
     use engine::types::zones::Zone;
     use futures_util::SinkExt;
     use server_core::game_action_payload_guard::MAX_ACTION_LIST_LEN;
-    use server_core::protocol::DeckData;
+    use server_core::protocol::{AiSeatRequest, DeckData};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::MaybeTlsStream;
     use tokio_tungstenite::WebSocketStream;
@@ -10705,7 +10753,7 @@ mod game_submission_tests {
     /// `Ok(..)` broadcast fan-out is not reachable over this harness, because
     /// `spawn_full_mode_server` builds `AppState` with an empty
     /// `CardDatabase::default()`.
-    async fn create_authenticated_game_socket(
+    async fn connect_and_hello(
         url: String,
     ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
         let (mut socket, _) = tokio_tungstenite::connect_async(url)
@@ -10729,6 +10777,13 @@ mod game_submission_tests {
             ))
             .await
             .expect("send hello");
+        socket
+    }
+
+    async fn create_authenticated_game_socket(
+        url: String,
+    ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
+        let mut socket = connect_and_hello(url).await;
 
         let create = ClientMessage::CreateGameWithSettings {
             deck: DeckData::default(),
@@ -10764,6 +10819,86 @@ mod game_submission_tests {
         }
 
         socket
+    }
+
+    async fn create_started_ai_game(
+        socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    ) -> (String, String, server_core::FullSessionKey) {
+        let create = ClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Alice".to_string(),
+            public: false,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            ai_seats: vec![AiSeatRequest {
+                seat_index: 1,
+                difficulty: phase_ai::config::AiDifficulty::Easy,
+                deck_name: None,
+                deck: None,
+            }],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+        };
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&create).expect("create json").into(),
+            ))
+            .await
+            .expect("send create");
+
+        let mut created = None;
+        let mut started = false;
+        while created.is_none() || !started {
+            match recv_server_message(socket).await {
+                ServerMessage::GameCreated {
+                    game_code,
+                    player_token,
+                    full_key: Some(full_key),
+                } => created = Some((game_code, player_token, full_key)),
+                ServerMessage::GameStarted { .. } => started = true,
+                ServerMessage::Error { message, .. } => {
+                    panic!("AI game creation failed: {message}")
+                }
+                _ => {}
+            }
+        }
+        created.expect("Full game identity")
+    }
+
+    async fn reconnect_started_game(
+        socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        game_code: &str,
+        player_token: &str,
+        full_key: server_core::FullSessionKey,
+    ) {
+        let reconnect = ClientMessage::Reconnect {
+            game_code: game_code.to_string(),
+            player_token: player_token.to_string(),
+            full_key,
+        };
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&reconnect)
+                    .expect("reconnect json")
+                    .into(),
+            ))
+            .await
+            .expect("send reconnect");
+        loop {
+            match recv_server_message(socket).await {
+                ServerMessage::GameStarted { .. } => return,
+                ServerMessage::Error { message, .. } => {
+                    panic!("current reconnect failed: {message}")
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Read frames until one is a submission answer, ignoring unrelated
@@ -10806,7 +10941,7 @@ mod game_submission_tests {
     /// refusal, so the client receives no server-policy prose.
     #[tokio::test]
     async fn action_frame_reaches_the_shared_submission_handler() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let answer = tokio::time::timeout(Duration::from_secs(5), async {
             let mut socket = create_authenticated_game_socket(url).await;
 
@@ -10834,6 +10969,73 @@ mod game_submission_tests {
             }
             other => panic!("expected ActionRejected from the shared handler, got {other:?}"),
         }
+    }
+
+    /// Drives the production WebSocket route through the replacement sequence:
+    /// A attaches, B takes the same Full seat, then stale A tries every
+    /// state-changing route relevant to terminal retirement and closes. The
+    /// active database row and B's follow-up reconnect prove neither stale
+    /// frame nor stale close can retire or disconnect B's current session.
+    #[tokio::test]
+    async fn stale_websocket_cannot_retire_or_disconnect_a_replaced_full_seat() {
+        let (url, server, _temp_dir, game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut socket_a = connect_and_hello(url.clone()).await;
+            let (game_code, player_token, full_key) = create_started_ai_game(&mut socket_a).await;
+
+            let mut socket_b = connect_and_hello(url).await;
+            reconnect_started_game(&mut socket_b, &game_code, &player_token, full_key.clone())
+                .await;
+
+            socket_a
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::PassPriority,
+                    })
+                    .expect("action json")
+                    .into(),
+                ))
+                .await
+                .expect("send stale action");
+            match recv_submission_answer(&mut socket_a).await {
+                ServerMessage::ActionFailed { message } => {
+                    assert_eq!(message, FULL_SOCKET_AUTHORITY_REJECTION);
+                }
+                other => panic!("stale action must be fenced, got {other:?}"),
+            }
+
+            socket_a
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::AbandonGame)
+                        .expect("abandon json")
+                        .into(),
+                ))
+                .await
+                .expect("send stale abandon");
+            match recv_server_message(&mut socket_a).await {
+                ServerMessage::Error { message, .. } => {
+                    assert_eq!(message, FULL_SOCKET_AUTHORITY_REJECTION);
+                }
+                other => panic!("stale abandon must be fenced, got {other:?}"),
+            }
+
+            socket_a.close(None).await.expect("close stale socket");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+
+            reconnect_started_game(&mut socket_b, &game_code, &player_token, full_key.clone())
+                .await;
+
+            assert_eq!(
+                game_db
+                    .load_active_full_key(&game_code)
+                    .expect("load active Full identity"),
+                Some(full_key),
+                "stale abandon must not retire the active Full row"
+            );
+        })
+        .await;
+        server.abort();
+        result.expect("stale socket replacement scenario timed out");
     }
 
     #[test]
@@ -10953,7 +11155,7 @@ mod game_submission_tests {
     /// `.ok_or(StaleInteraction)` can produce it.
     #[tokio::test]
     async fn interaction_frame_is_accepted_by_the_wire_schema() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let answer = tokio::time::timeout(Duration::from_secs(5), async {
             let mut socket = create_authenticated_game_socket(url).await;
 
@@ -10991,7 +11193,7 @@ mod game_submission_tests {
     /// is pinned by `handler_payload_channels_agree_with_the_wire`.
     #[tokio::test]
     async fn an_oversized_interaction_is_answered_on_the_benign_channel() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let answers = tokio::time::timeout(Duration::from_secs(5), async {
             let mut socket = create_authenticated_game_socket(url).await;
 
@@ -11054,7 +11256,7 @@ mod game_submission_tests {
     /// this handler's blanket answer.
     #[tokio::test]
     async fn a_game_submission_without_a_session_is_answered_on_the_failed_channel() {
-        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
         let answer = tokio::time::timeout(Duration::from_secs(5), async {
             let (mut socket, _) = tokio_tungstenite::connect_async(url)
                 .await
