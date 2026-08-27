@@ -3637,14 +3637,33 @@ fn terminal_artifact(
     })
 }
 
-async fn prepare_full_terminal(
+/// Whether terminal delivery preparation failed before or after its database
+/// transaction committed. The latter has already retired the active runtime,
+/// so callers must never restore it in memory.
+enum TerminalPreparationFailure {
+    BeforeTerminalCommit(String),
+    AfterTerminalCommit(String),
+}
+
+impl TerminalPreparationFailure {
+    fn message(self) -> String {
+        match self {
+            Self::BeforeTerminalCommit(message) | Self::AfterTerminalCommit(message) => message,
+        }
+    }
+}
+
+async fn prepare_full_terminal_with_commit_status(
     game_db: &SharedGameDb,
     artifact: persistence::FullTerminalArtifact,
-) -> Result<Vec<(PlayerId, server_core::CurrentTerminalDelivery)>, String> {
+) -> Result<Vec<(PlayerId, server_core::CurrentTerminalDelivery)>, TerminalPreparationFailure> {
     let db = game_db.clone();
-    tokio::task::spawn_blocking(move || {
-        db.prepare_full_terminal(&artifact)
-            .map_err(|error| format!("Failed to prepare terminal result: {error}"))?;
+    tokio::task::spawn_blocking(move || -> Result<_, TerminalPreparationFailure> {
+        db.prepare_full_terminal(&artifact).map_err(|error| {
+            TerminalPreparationFailure::BeforeTerminalCommit(format!(
+                "Failed to prepare terminal result: {error}"
+            ))
+        })?;
         artifact
             .recipients
             .iter()
@@ -3654,14 +3673,35 @@ async fn prepare_full_terminal(
                     recipient.player_id,
                     &recipient.pre_terminal_player_token,
                 )
-                .map_err(|error| format!("Failed to load terminal delivery: {error}"))?
+                .map_err(|error| {
+                    TerminalPreparationFailure::AfterTerminalCommit(format!(
+                        "Failed to load terminal delivery: {error}"
+                    ))
+                })?
                 .map(|delivery| (recipient.player_id, delivery))
-                .ok_or_else(|| "Prepared terminal delivery is missing".to_string())
+                .ok_or_else(|| {
+                    TerminalPreparationFailure::AfterTerminalCommit(
+                        "Prepared terminal delivery is missing".to_string(),
+                    )
+                })
             })
             .collect()
     })
     .await
-    .map_err(|error| format!("Terminal persistence task failed: {error}"))?
+    .map_err(|error| {
+        TerminalPreparationFailure::AfterTerminalCommit(format!(
+            "Terminal persistence task failed: {error}"
+        ))
+    })?
+}
+
+async fn prepare_full_terminal(
+    game_db: &SharedGameDb,
+    artifact: persistence::FullTerminalArtifact,
+) -> Result<Vec<(PlayerId, server_core::CurrentTerminalDelivery)>, String> {
+    prepare_full_terminal_with_commit_status(game_db, artifact)
+        .await
+        .map_err(TerminalPreparationFailure::message)
 }
 
 /// Only a waiting-room session can be retired without a recipient delivery:
@@ -7401,10 +7441,23 @@ async fn handle_client_message(
             };
             let (terminal_deliveries, committed_started_session) = match commit {
                 AbandonCommit::Terminal(artifact, removed) => {
-                    let deliveries = match prepare_full_terminal(game_db, artifact).await {
+                    let terminal_key = artifact.key.clone();
+                    let deliveries = match prepare_full_terminal_with_commit_status(
+                        game_db, artifact,
+                    )
+                    .await
+                    {
                         Ok(deliveries) => deliveries,
-                        Err(error) => {
-                            let recovered = {
+                        Err(TerminalPreparationFailure::BeforeTerminalCommit(error)) => {
+                            // A failed prepare call is not enough to prove the
+                            // transaction rolled back: a commit error can be
+                            // indeterminate. Restore only after the database
+                            // still confirms this exact Full key is active.
+                            let still_active = matches!(
+                                game_db.load_active_full_key(&game_code),
+                                Ok(Some(active_key)) if active_key == terminal_key
+                            );
+                            let recovered = if still_active {
                                 let mut mgr = state.lock().await;
                                 if mgr.sessions.contains_key(&game_code) {
                                     false
@@ -7412,11 +7465,30 @@ async fn handle_client_message(
                                     mgr.restore_session(removed);
                                     true
                                 }
+                            } else {
+                                false
                             };
                             error!(game = %game_code, %error, "terminal preparation failed");
-                            if !recovered {
-                                error!(game = %game_code, "terminal preparation recovery found a replacement session");
+                            if recovered {
+                                let _ = tx.send(ServerMessage::error(error));
+                                return;
                             }
+                            connections.lock().await.remove(&game_code);
+                            game_spectators.lock().await.remove(&game_code);
+                            lobby.lock().await.lobby_mut().unregister_game(&game_code);
+                            error!(game = %game_code, "terminal preparation did not leave this Full key active; retaining in-memory retirement");
+                            let _ = tx.send(ServerMessage::error(error));
+                            return;
+                        }
+                        Err(TerminalPreparationFailure::AfterTerminalCommit(error)) => {
+                            // The database has already retired the active runtime.
+                            // Keep the in-memory session retired as well, then
+                            // clean up stale routes before reporting the delivery
+                            // read failure to the committing client.
+                            connections.lock().await.remove(&game_code);
+                            game_spectators.lock().await.remove(&game_code);
+                            lobby.lock().await.lobby_mut().unregister_game(&game_code);
+                            error!(game = %game_code, %error, "terminal delivery preparation failed after terminal commit");
                             let _ = tx.send(ServerMessage::error(error));
                             return;
                         }
@@ -10423,7 +10495,7 @@ mod issue_4548_full_create_tests {
         String,
         tokio::task::JoinHandle<()>,
         tempfile::TempDir,
-        SharedGameDb,
+        AppState,
     ) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let game_db = Arc::new(
@@ -10433,25 +10505,26 @@ mod issue_4548_full_create_tests {
             )
             .expect("game db"),
         );
+        let app_state = AppState {
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
+            draft_pools: Arc::new(draft_pools::DraftPools::default()),
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            db: Arc::new(CardDatabase::default()),
+            lobby: Arc::new(Mutex::new(Broker::new())),
+            lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+            player_count: Arc::new(AtomicU32::new(0)),
+            game_db,
+            draft_spectators: Arc::new(Mutex::new(HashMap::new())),
+            game_spectators: Arc::new(Mutex::new(HashMap::new())),
+            mode: ServerMode::Full,
+            context: ServerContext::default(),
+            public_url: None,
+            allowed_origin: None,
+        };
         let app = Router::new()
             .route("/ws", get(ws_handler))
-            .with_state(AppState {
-                sessions: Arc::new(Mutex::new(SessionManager::new())),
-                draft_sessions: Arc::new(Mutex::new(DraftSessionManager::new())),
-                draft_pools: Arc::new(draft_pools::DraftPools::default()),
-                connections: Arc::new(Mutex::new(HashMap::new())),
-                db: Arc::new(CardDatabase::default()),
-                lobby: Arc::new(Mutex::new(Broker::new())),
-                lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
-                player_count: Arc::new(AtomicU32::new(0)),
-                game_db: game_db.clone(),
-                draft_spectators: Arc::new(Mutex::new(HashMap::new())),
-                game_spectators: Arc::new(Mutex::new(HashMap::new())),
-                mode: ServerMode::Full,
-                context: ServerContext::default(),
-                public_url: None,
-                allowed_origin: None,
-            });
+            .with_state(app_state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -10460,7 +10533,7 @@ mod issue_4548_full_create_tests {
             axum::serve(listener, app).await.expect("test server");
         });
 
-        (format!("ws://{addr}/ws"), handle, temp_dir, game_db)
+        (format!("ws://{addr}/ws"), handle, temp_dir, app_state)
     }
 
     pub(super) async fn recv_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
@@ -10974,11 +11047,11 @@ mod game_submission_tests {
     /// Drives the production WebSocket route through the replacement sequence:
     /// A attaches, B takes the same Full seat, then stale A tries every
     /// state-changing route relevant to terminal retirement and closes. The
-    /// active database row and B's follow-up reconnect prove neither stale
-    /// frame nor stale close can retire or disconnect B's current session.
+    /// active database row plus the state/map assertions before B reconnects
+    /// prove neither stale frame nor stale close can retire or disconnect B.
     #[tokio::test]
     async fn stale_websocket_cannot_retire_or_disconnect_a_replaced_full_seat() {
-        let (url, server, _temp_dir, game_db) = spawn_full_mode_server().await;
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let mut socket_a = connect_and_hello(url.clone()).await;
             let (game_code, player_token, full_key) = create_started_ai_game(&mut socket_a).await;
@@ -11020,13 +11093,45 @@ mod game_submission_tests {
             }
 
             socket_a.close(None).await.expect("close stale socket");
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while app_state.player_count.load(Ordering::Relaxed) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("stale socket close must finish server-side cleanup");
+
+            {
+                let manager = app_state.sessions.lock().await;
+                let session = manager
+                    .sessions
+                    .get(&game_code)
+                    .expect("stale close must not remove B's session");
+                assert!(
+                    session.connected[0],
+                    "stale close must not mark B's seat disconnected"
+                );
+                assert!(
+                    !manager.reconnect.is_disconnected(&game_code, PlayerId(0)),
+                    "stale close must not create B's reconnect lease"
+                );
+            }
+            assert!(
+                app_state
+                    .connections
+                    .lock()
+                    .await
+                    .get(&game_code)
+                    .is_some_and(|players| players.contains_key(&PlayerId(0))),
+                "stale close must retain B's current sender-map entry"
+            );
 
             reconnect_started_game(&mut socket_b, &game_code, &player_token, full_key.clone())
                 .await;
 
             assert_eq!(
-                game_db
+                app_state
+                    .game_db
                     .load_active_full_key(&game_code)
                     .expect("load active Full identity"),
                 Some(full_key),
