@@ -880,7 +880,10 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             | GameFormat::Archenemy
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
-            | GameFormat::Limited => false,
+            | GameFormat::Limited
+            // A Custom id alone does not carry its `FormatConfig.custom_rules`,
+            // which is the authority for custom commander eligibility.
+            | GameFormat::Custom(_) => false,
             // Matches `evaluate_selected_format_summary`'s Custom arm: no
             // CustomFormatRules resolver exists yet, so eligibility cannot be
             // answered here. `false` is the fail-closed reading — a permissive
