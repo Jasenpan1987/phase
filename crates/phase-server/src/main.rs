@@ -1431,8 +1431,13 @@ async fn full_socket_authority_rejection(
             .is_some()
             .then_some(FULL_SOCKET_FRESH_REJECTION),
         FullSocketAuthority::CurrentSeat => {
-            (!full_socket_is_current_preflight(state, connections, identity, tx).await)
-                .then_some(FULL_SOCKET_AUTHORITY_REJECTION)
+            if identity.full_seat().is_some()
+                && !full_socket_is_current_preflight(state, connections, identity, tx).await
+            {
+                Some(FULL_SOCKET_AUTHORITY_REJECTION)
+            } else {
+                None
+            }
         }
         FullSocketAuthority::Reconnect => {
             let Some((attached_game_code, attached_player, _)) = identity.full_seat() else {
