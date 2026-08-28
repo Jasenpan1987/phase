@@ -9934,7 +9934,7 @@ mod full_socket_authority_tests {
                 &ClientMessage::Reconnect {
                     game_code,
                     player_token: player_token.clone(),
-                    full_key: persisted.key,
+                    full_key: persisted.key.clone(),
                 },
                 &state,
                 &connections,
