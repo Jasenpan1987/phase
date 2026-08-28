@@ -2323,6 +2323,20 @@ pub(crate) fn parse_static_line_inner(
     if nom_primitives::scan_contains(tp.lower, "can't block")
         && !nom_primitives::scan_contains(tp.lower, "can't be blocked")
     {
+        // CR 509.1b: the symmetric conjunction "<subject> can't block or be
+        // blocked by <object>" is TWO opposite-direction restrictions sharing one
+        // printed object; a single `StaticDefinition` cannot carry both. It is
+        // owned by `parse_symmetric_block_conjunction_static` on the multi-static
+        // path (`shared.rs`). Decline here — on the PHRASE alone, via the shared
+        // marker, so an object that grammar cannot yet express ALSO declines — so
+        // no single-return caller can receive the inverse blanket restriction,
+        // which both invents a restriction the card lacks and drops the one it
+        // has. Mirrors the subject-scoped defer in the "can't attack" arm below.
+        if nom_primitives::scan_preceded(tp.lower, parse_cant_block_or_be_blocked_by_marker)
+            .is_some()
+        {
+            return None;
+        }
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());

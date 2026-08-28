@@ -2012,6 +2012,49 @@ pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetF
     Ok((rest, filter))
 }
 
+/// CR 509.1b: the phrase MARKER of the symmetric block conjunction —
+/// "can't block or be blocked by". Split out from the full predicate below so
+/// the terminal blanket `can't block` arm in `dispatch.rs` can decline this
+/// shape on the PHRASE ALONE, without also requiring the object to parse: an
+/// object this grammar cannot yet express must leave the line honestly
+/// unsupported (coverage red), never lower to the INVERSE blanket restriction.
+///
+/// The marker deliberately stops BEFORE the separating space, and the space
+/// lives in the predicate instead. That is load-bearing, not cosmetic: with the
+/// space folded into this tag, the object-less `"~ can't block or be blocked
+/// by."` fails the marker at every word boundary `scan_preceded` tries, slips
+/// past the guard, and lowers to a blanket `CantBlock` — which is exactly the
+/// bug this split exists to prevent.
+///
+/// Two structural segments (prohibition verb, then conjunction + object head)
+/// rather than one flat literal, so a reversed-order or trailing-gate sibling
+/// factors onto an existing axis instead of adding a full-line `alt` arm.
+pub(crate) fn parse_cant_block_or_be_blocked_by_marker(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("can't block").parse(input)?;
+    let (input, _) = tag(" or be blocked by").parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 509.1b: predicate combinator for the symmetric block conjunction
+/// "can't block or be blocked by <object>" — ONE printed object serving TWO
+/// opposite-direction restrictions (Sneaky Homunculus; the Spirit token rules
+/// text granted by the Avatar: The Last Airbender cycle).
+///
+/// Sibling of [`parse_cant_attack_you_or_block_predicate`]: same
+/// marker-then-object shape, and the object goes through the same single grammar
+/// authority [`parse_block_object_filter`], so the class is every object that
+/// grammar expresses (static or dynamic power comparison, `non-<subtype>`, card
+/// type, colour, controller scope) rather than the two wordings printed today.
+///
+/// The separating space is consumed HERE rather than in the marker, so an absent
+/// object declines at `space1` while the marker still matches for the
+/// `dispatch.rs` decline guard.
+fn parse_cant_block_or_be_blocked_by_predicate(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, ()) = parse_cant_block_or_be_blocked_by_marker(input)?;
+    let (input, _) = space1(input)?;
+    parse_block_object_filter(input)
+}
+
 /// CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
 /// control" (Storm, Windrider). The single-clause "<subject> can't attack you"
 /// already parses (`parse_subject_combat_rule_static`); the trailing "or block
@@ -2052,6 +2095,65 @@ fn parse_subject_cant_attack_you_or_block_static(
         text,
     );
     Some(vec![attack, block])
+}
+
+/// CR 509.1b + CR 604.1 + CR 611.3a: "<subject> can't block or be blocked by
+/// <object>" — a CONJUNCTION of two restrictions that share one printed object,
+/// so it needs one `StaticDefinition` per direction:
+///
+///  1. blocker side — `BlockRestriction { Not(<object>) }`. `BlockRestriction`
+///     is a whitelist ("can block only attackers matching filter"), so
+///     "can't block X" is exactly "can block only things that are NOT X" —
+///     produced by `lower_rule_static`, the single lowering authority the bare
+///     "<subject> can't block <object>" production already uses.
+///  2. attacker side — `CantBeBlockedBy { filter: <object> }`. CR 509.1b: "A
+///     restriction may be created by an evasion ability (a static ability an
+///     attacking creature has that restricts what can block it)."
+///
+/// Both carry `affected` = the SUBJECT filter, so the production covers any
+/// subject `parse_rule_static_subject_filter` expresses, not only `~`. Emitted
+/// in printed clause order (block half, then be-blocked half).
+///
+/// CR 509.1b also states "Different evasion abilities are cumulative", which is
+/// why two independent definitions is the rules-correct shape rather than one
+/// fused mode: each is evaluated on its own by
+/// `combat.rs::can_block_pair_with_precomputed` and independently by
+/// `combat.rs::validate_blockers_core`.
+///
+/// The single-return `parse_static_line` path CANNOT represent this shape, so
+/// the blanket `can't block` arm in `dispatch.rs` declines it via the shared
+/// marker instead of lowering half of it. Before this production the whole line
+/// collapsed to `CantBlock { affected: SelfRef }` — simultaneously INVENTING a
+/// restriction the card lacks (the subject could never block anything), DROPPING
+/// the one it has (the filtered creatures could block it freely), and, for a
+/// filtered subject, losing the subject scope as well.
+fn parse_symmetric_block_conjunction_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (subject_lower, object, rest) =
+        nom_primitives::scan_preceded(lower, parse_cant_block_or_be_blocked_by_predicate)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    // Fail closed (CR 604.1): an unrecognized rider must leave the line honestly
+    // unsupported rather than shipping two statics that ignore it. No printed
+    // card in the class has one; the extension point when one appears is
+    // `parse_unless_static_condition`, as in `parse_subject_combat_rule_static`.
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+
+    let block_half = lower_rule_static(
+        RuleStaticPredicate::CantBlock,
+        Some(object.clone()),
+        affected.clone(),
+        text,
+    );
+    let evasion_half = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter: object })
+        .affected(affected)
+        .description(text.to_string());
+    Some(vec![block_half, evasion_half])
 }
 
 /// CR 613.1f (Layer 6) + CR 105.2: a per-recipient COLOR-qualified keyword grant —
@@ -2290,6 +2392,19 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // Must precede generic combat-rule dispatch, which would collapse the whole
     // line to a self-scoped blanket CantAttack (Storm, Windrider).
     if let Some(defs) = parse_subject_cant_attack_you_or_block_static(&stripped, &lower) {
+        return defs;
+    }
+
+    // CR 509.1b: "<subject> can't block or be blocked by <object>" — the
+    // symmetric sibling of the compound above: TWO opposite-direction
+    // restrictions sharing ONE printed object, so it also needs the multi-static
+    // path. Must precede generic combat-rule dispatch, which collapses the whole
+    // line to a blanket `CantBlock { affected: SelfRef }` (Sneaky Homunculus;
+    // the Spirit token granted by the Avatar: TLA cycle). Reached by BOTH
+    // consumers of this entry point — the priority-7 router (`oracle.rs:1034`)
+    // and `token.rs::push_parsed_statics` (`:1260`) — which is why the 7
+    // token-granting cards need no separate fix.
+    if let Some(defs) = parse_symmetric_block_conjunction_static(&stripped, &lower) {
         return defs;
     }
 
