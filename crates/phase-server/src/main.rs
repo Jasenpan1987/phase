@@ -1315,7 +1315,6 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         }
 
         ClientMessage::Action { .. }
-        | ClientMessage::ResolveAll { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::AbandonGame
