@@ -196,9 +196,11 @@ jobs:
 
       # Some snapshot tests query Cargo metadata at runtime. This makes Cargo
       # available but does not build test binaries; those come from the archive.
+      # Do not restore or save a Rust target cache: the archive is the cache.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
+          cache: false
 
       - uses: taiki-e/install-action@v2
         with:
@@ -217,7 +219,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/4 --archive-file nextest-archive.tar.zst --status-level fail --final-status-level fail
+        run: cargo-nextest nextest run --profile ci --partition count:${{ matrix.shard }}/4 --archive-file nextest-archive.tar.zst --extract-to target --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
