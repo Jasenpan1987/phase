@@ -211,6 +211,9 @@ jobs:
         with:
           name: nextest-archive
 
+      - name: Prepare test archive destination
+        run: mkdir -p target
+
       - name: Run tests
         # The archive retains build options. Each shard only extracts it and
         # executes its partition; it does not invoke Cargo or compile Rust.
