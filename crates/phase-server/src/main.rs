@@ -1440,9 +1440,7 @@ async fn full_socket_authority_rejection(
             }
         }
         FullSocketAuthority::Reconnect => {
-            let Some((attached_game_code, attached_player, _)) = identity.full_seat() else {
-                return None;
-            };
+            let (attached_game_code, attached_player, _) = identity.full_seat()?;
             let ClientMessage::Reconnect {
                 game_code,
                 player_token,
@@ -7409,7 +7407,7 @@ async fn handle_client_message(
             // that arrives after this point therefore cannot replace the
             // committing socket and then observe a database-retired runtime.
             enum AbandonCommit {
-                Terminal(persistence::FullTerminalArtifact, GameSession),
+                Terminal(persistence::FullTerminalArtifact, Box<GameSession>),
                 Unstarted,
                 Missing,
             }
@@ -7432,7 +7430,7 @@ async fn handle_client_message(
                                 let removed = mgr
                                     .remove_game(&game_code)
                                     .expect("started session was present while committing abandon");
-                                AbandonCommit::Terminal(artifact, removed)
+                                AbandonCommit::Terminal(artifact, Box::new(removed))
                             }
                             Err(error) => {
                                 let _ = tx.send(ServerMessage::error(error));
@@ -7467,7 +7465,7 @@ async fn handle_client_message(
                                 if mgr.sessions.contains_key(&game_code) {
                                     false
                                 } else {
-                                    mgr.restore_session(removed);
+                                    mgr.restore_session(*removed);
                                     true
                                 }
                             } else {
