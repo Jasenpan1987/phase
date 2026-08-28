@@ -2328,10 +2328,19 @@ pub(crate) fn parse_static_line_inner(
         // printed object; a single `StaticDefinition` cannot carry both. It is
         // owned by `parse_symmetric_block_conjunction_static` on the multi-static
         // path (`shared.rs`). Decline here — on the PHRASE alone, via the shared
-        // marker, so an object that grammar cannot yet express ALSO declines — so
-        // no single-return caller can receive the inverse blanket restriction,
-        // which both invents a restriction the card lacks and drops the one it
-        // has. Mirrors the subject-scoped defer in the "can't attack" arm below.
+        // marker, so an object that grammar cannot yet express ALSO declines —
+        // rather than lowering the inverse blanket restriction, which both invents
+        // a restriction the card lacks and drops the one it has. Mirrors the
+        // subject-scoped defer in the "can't attack" arm below.
+        //
+        // This guard covers only the lines that REACH this arm. The other
+        // single-return production that consumes a bare `can't block` as its own
+        // predicate — `parse_subject_combat_rule_static`, dispatched above at the
+        // combat-rule family — carries its own positional copy of this decline,
+        // because its trailing-`unless` fallback accepts a failed object parse and
+        // would emit the inverse restriction before ever reaching here (#7454
+        // round 2). Both guards are load-bearing; see the marker's doc comment for
+        // why this one may scan the whole line and that one may not.
         if nom_primitives::scan_preceded(tp.lower, parse_cant_block_or_be_blocked_by_marker)
             .is_some()
         {

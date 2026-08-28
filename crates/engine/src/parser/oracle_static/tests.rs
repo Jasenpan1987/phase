@@ -33658,6 +33658,173 @@ fn symmetric_block_conjunction_declines_a_missing_or_unparseable_object() {
     );
 }
 
+/// CR 509.1b + CR 604.1 (#7454, round 2): a trailing RIDER must not smuggle the
+/// symmetric conjunction past the decline. `parse_subject_combat_rule_static` is
+/// dispatched BEFORE the terminal blanket `can't block` arm, and its
+/// trailing-`unless` fallback accepted a FAILED object parse and then attached
+/// `parse_unless_static_condition` over the whole line — so the `unless` family,
+/// and only that family, still lowered the clause to the INVERSE blanket
+/// `CantBlock`. That is a silent inversion, not an honest gap: it invents a
+/// restriction the card lacks, drops the one it prints, and the `CantBlock`
+/// coverage anchor passes vacuously on the same "can't block" substring, so the
+/// card would report `supported = true, gap_count = 0`.
+///
+/// No printed card carries a rider on this phrase (census: 8 cards, none gated),
+/// so this is a SHAPE test BY DESIGN — there is no runtime behaviour to pin, and
+/// a fabricated card driven through `apply()` would assert on an input the engine
+/// can never receive. What must hold is that both entry points stay honestly
+/// unsupported (coverage red) rather than exporting an inversion.
+#[test]
+fn symmetric_block_conjunction_declines_every_trailing_rider() {
+    use crate::types::statics::StaticMode;
+
+    // POSITIVE REACH-GUARD 1 — the guarded seam is alive and still reaches its
+    // trailing-rider branch: the SAME rider on the ONE-direction sibling parses
+    // through this exact function AND attaches its condition. So every decline
+    // below is caused by the conjunction marker, not by an unparseable rider, a
+    // dead branch, or an upstream predicate miss.
+    let sibling = super::evasion::parse_subject_combat_rule_static(
+        "~ can't block Spirits unless you control a Wall.",
+    )
+    .expect("the one-direction sibling must still parse through this seam");
+    assert!(
+        matches!(sibling.mode, StaticMode::BlockRestriction { .. }),
+        "reach-guard: the seam must still lower a one-direction object, got: {:?}",
+        sibling.mode
+    );
+    assert!(
+        sibling.condition.is_some(),
+        "reach-guard: the seam must still attach the trailing rider"
+    );
+
+    // POSITIVE REACH-GUARD 2 — subject and object both parse for every subject
+    // used below: strip the rider and the multi path still yields both halves.
+    for ungated in [
+        "~ can't block or be blocked by non-Spirit creatures.",
+        "Creatures you control can't block or be blocked by non-Spirit creatures.",
+    ] {
+        assert_eq!(
+            parse_static_line_multi(ungated).len(),
+            2,
+            "reach-guard: {ungated} must still yield both halves"
+        );
+    }
+
+    // The `unless` family — the channel that bypassed the terminal arm's guard.
+    // A board-state rider and a cost rider reach two DIFFERENT condition parsers
+    // (`Not { IsPresent }` vs `UnlessPay`) and both produced the inversion, so
+    // both are asserted. The filtered subject is included because it lost the
+    // SUBJECT SCOPE as well as the direction (`CantBlock` on `Typed`, not
+    // `SelfRef`). The unparseable object proves the decline does not depend on the
+    // object parsing.
+    for line in [
+        "~ can't block or be blocked by creatures with power 2 or greater unless you control a Wall.",
+        "~ can't block or be blocked by non-Spirit creatures unless you pay {2}.",
+        "~ can't block or be blocked by non-Spirit creatures unless its controller pays {2}.",
+        "Creatures you control can't block or be blocked by non-Spirit creatures unless you control a Wall.",
+        "~ can't block or be blocked by wibble unless you control a Wall.",
+    ] {
+        assert!(
+            super::evasion::parse_subject_combat_rule_static(line).is_none(),
+            "{line}: the seam must decline, not lower the inverse blanket restriction, got: {:?}",
+            super::evasion::parse_subject_combat_rule_static(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line(line).is_none(),
+            "{line}: the single-return entry point must decline, got: {:?}",
+            parse_static_line(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line_multi(line).is_empty(),
+            "{line}: the multi entry point must stay honestly unsupported, got: {:#?}",
+            parse_static_line_multi(line),
+        );
+    }
+
+    // The sibling riders already declined honestly at 0 statics. Pinned so this
+    // fix cannot over-reach into them — and so a future "fix" cannot make them
+    // lower the inversion the `unless` family just stopped producing.
+    for line in [
+        "~ can't block or be blocked by non-Spirit creatures as long as you control a Wall.",
+        "~ can't block or be blocked by non-Spirit creatures if you control a Wall.",
+        "~ can't block or be blocked by non-Spirit creatures this turn.",
+    ] {
+        assert!(
+            parse_static_line(line).is_none(),
+            "{line}: must stay declined, got: {:?}",
+            parse_static_line(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line_multi(line).is_empty(),
+            "{line}: must stay declined, got: {:#?}",
+            parse_static_line_multi(line),
+        );
+    }
+}
+
+/// CR 509.1b (#7454, round 2): the rider decline is POSITIONAL — it fires only
+/// where the guarded production's OWN `can't block` predicate opens the
+/// conjunction. A line that merely CONTAINS the phrase in a DIFFERENT clause
+/// belongs to another production and must keep its exact lowering. Hoisting a
+/// line-wide marker scan ahead of the combat-rule family instead of guarding the
+/// seam was measured to break the second row below, which is why the guard is
+/// applied at the predicate offset rather than over the line.
+#[test]
+fn marker_in_another_clause_keeps_its_owning_production() {
+    use crate::types::statics::StaticMode;
+
+    // A quoted granted ability: the OUTER line is a subject grant, and the inner
+    // static is correctly decomposed into BOTH directions as `AddStaticMode`
+    // modifications by the grant path — which runs before the combat-rule family.
+    let granted = parse_static_line(
+        "Spirits you control have \"This creature can't block or be blocked by non-Spirit creatures.\"",
+    )
+    .expect("the quoted grant must still parse");
+    let granted_modes: Vec<&StaticMode> = granted
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddStaticMode { mode } => Some(mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        granted_modes.len(),
+        2,
+        "the granted ability must keep BOTH directions: {:?}",
+        granted.modifications
+    );
+    assert!(
+        matches!(granted_modes[0], StaticMode::BlockRestriction { .. })
+            && matches!(granted_modes[1], StaticMode::CantBeBlockedBy { .. }),
+        "the grant must carry one mode per direction, got: {granted_modes:?}"
+    );
+
+    // A sibling sentence owned by a LATER dispatch arm than the guarded seam: the
+    // single-return path must still return THAT sentence's static, rider intact.
+    let two_sentences =
+        "~ can't attack unless you control a Wall. ~ can't block or be blocked by Walls.";
+    let sibling_sentence =
+        parse_static_line(two_sentences).expect("the `can't attack` sentence must still parse");
+    assert!(
+        matches!(sibling_sentence.mode, StaticMode::CantAttack),
+        "the unrelated sentence must keep its own lowering, got: {:?}",
+        sibling_sentence.mode
+    );
+    assert!(
+        sibling_sentence.condition.is_some(),
+        "its rider must survive: {:?}",
+        sibling_sentence.condition
+    );
+    // ...and the multi path still binds all three statics the line defines.
+    assert_eq!(
+        parse_static_line_multi(two_sentences).len(),
+        3,
+        "both sentences must bind on the multi path: {:#?}",
+        parse_static_line_multi(two_sentences),
+    );
+}
+
 /// CR 509.1b (#7454): the decline guard must not OVER-REACH. Every adjacent
 /// block-object shape that reaches the same terminal `can't block` arm keeps its
 /// exact prior lowering, including the one the `!scan_contains("can't be

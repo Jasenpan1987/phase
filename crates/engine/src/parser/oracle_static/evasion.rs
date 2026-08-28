@@ -2399,6 +2399,33 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         &lower,
         parse_combat_rule_static_predicate_with_defended_nom,
     )?;
+    // CR 509.1b + CR 604.1 (#7454): "<subject> can't block or be blocked by
+    // <object>" is a CONJUNCTION of two opposite-direction restrictions sharing
+    // ONE printed object, so it needs one definition per direction and belongs to
+    // `parse_symmetric_block_conjunction_static` on the multi-static path. This
+    // production returns ONE definition, so it is never the owner — decline the
+    // shape here, BEFORE the object is attempted, so an object this grammar
+    // cannot yet express declines too. Without this the object parse fails, the
+    // clause reaches the trailing-`unless` branch at the bottom of this function,
+    // and the whole line lowers to the INVERSE blanket `CantBlock` with the rider
+    // attached: it invents a restriction the card lacks (the subject could never
+    // block anything) and drops the one it prints, while the coverage anchor for
+    // `CantBlock` passes vacuously on the same "can't block" substring.
+    //
+    // The shared marker is applied POSITIONALLY — at the offset where THIS
+    // production's own predicate matched, `subject_lower` being the text before
+    // it — never scanned across the whole line. That distinction is load-bearing:
+    // a line that merely CONTAINS the phrase in a different clause (a quoted
+    // granted ability, "Spirits you control have \"This creature can't block or be
+    // blocked by non-Spirit creatures.\"", or a sibling sentence) is owned by an
+    // earlier arm that lowers it correctly, and a line-wide gate would pre-empt
+    // it. Sibling guard: the terminal blanket `can't block` arm in `dispatch.rs`,
+    // which is inside that arm and so may safely scan.
+    if super::shared::parse_cant_block_or_be_blocked_by_marker(&lower[subject_lower.len()..])
+        .is_ok()
+    {
+        return None;
+    }
     // CR 509.1b: the optional OBJECT of a blocking prohibition — "<subject>
     // can't block <object>" (Gornog, the Red Reaper; Bower Passage; Hinterland
     // Drake). The blocker-side mirror of `defended` (CR 508.1b) on the attack

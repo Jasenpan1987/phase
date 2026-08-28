@@ -2013,18 +2013,49 @@ pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetF
 }
 
 /// CR 509.1b: the phrase MARKER of the symmetric block conjunction —
-/// "can't block or be blocked by". Split out from the full predicate below so
-/// the terminal blanket `can't block` arm in `dispatch.rs` can decline this
-/// shape on the PHRASE ALONE, without also requiring the object to parse: an
-/// object this grammar cannot yet express must leave the line honestly
-/// unsupported (coverage red), never lower to the INVERSE blanket restriction.
+/// "can't block or be blocked by". Split out from the full predicate below so a
+/// decline guard can reject this shape on the PHRASE ALONE, without also
+/// requiring the object to parse: an object this grammar cannot yet express must
+/// leave the line honestly unsupported (coverage red), never lower to the
+/// INVERSE blanket restriction.
+///
+/// Scope of that guarantee, stated exactly, because a comment claiming more than
+/// the code delivers is itself a defect: it holds for the SINGLE-RETURN
+/// `parse_static_line` path, and it is delivered by a PAIR of guards — one per
+/// production on that path that consumes a bare `can't block` as its own
+/// predicate and lowers it to one definition. Either guard alone leaves the
+/// other's channel open:
+///
+///  1. `evasion::parse_subject_combat_rule_static` applies this marker
+///     POSITIONALLY, at the offset its own predicate matched, and declines before
+///     attempting the object. It is dispatched FIRST, and its trailing-`unless`
+///     fallback would otherwise accept a failed object parse and attach the rider
+///     to the inverse blanket restriction (#7454 round 2).
+///  2. The terminal blanket `can't block` arm in `dispatch.rs` scans the line for
+///     this marker. A line-wide scan is safe THERE and only there: that arm runs
+///     after every production that legitimately owns a line merely CONTAINING the
+///     phrase in another clause (a quoted granted ability, a sibling sentence),
+///     so it cannot pre-empt them. Hoisting a line-wide scan ahead of the
+///     combat-rule family instead was measured to do exactly that.
+///
+/// It is NOT a whole-parser invariant, and specifically not a multi-static-path
+/// one. The compound activation-prohibition arm in `parse_static_line_multi_dispatch`
+/// ("<subject> … , and [its] activated abilities can't be activated") still
+/// derives a bare `CantBlock` for the combat half — from `parse_restriction_modes`
+/// for an attached subject, and from its own `scan_contains("can't block")`
+/// fallback otherwise — so a marker line carrying that tail still yields the
+/// inverse restriction there. Measured: over 825 generated
+/// subject × object × rider shapes, `parse_static_line` returns a blanket
+/// `CantBlock` for none, while `parse_static_line_multi` returns one for the 165
+/// that carry that activation tail. No printed card carries it (census: 8 cards
+/// print this phrase, none with any rider).
 ///
 /// The marker deliberately stops BEFORE the separating space, and the space
 /// lives in the predicate instead. That is load-bearing, not cosmetic: with the
 /// space folded into this tag, the object-less `"~ can't block or be blocked
 /// by."` fails the marker at every word boundary `scan_preceded` tries, slips
-/// past the guard, and lowers to a blanket `CantBlock` — which is exactly the
-/// bug this split exists to prevent.
+/// past guard 2, and lowers to a blanket `CantBlock` — which is exactly the bug
+/// this split exists to prevent.
 ///
 /// Two structural segments (prohibition verb, then conjunction + object head)
 /// rather than one flat literal, so a reversed-order or trailing-gate sibling
