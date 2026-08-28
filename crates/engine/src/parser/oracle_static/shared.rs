@@ -2016,39 +2016,91 @@ pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetF
 /// "can't block or be blocked by". Split out from the full predicate below so a
 /// decline guard can reject this shape on the PHRASE ALONE, without also
 /// requiring the object to parse: an object this grammar cannot yet express must
-/// leave the line honestly unsupported (coverage red), never lower to the
-/// INVERSE blanket restriction.
+/// never lower to the INVERSE blanket restriction.
 ///
 /// Scope of that guarantee, stated exactly, because a comment claiming more than
-/// the code delivers is itself a defect: it holds for the SINGLE-RETURN
-/// `parse_static_line` path, and it is delivered by a PAIR of guards — one per
-/// production on that path that consumes a bare `can't block` as its own
-/// predicate and lowers it to one definition. Either guard alone leaves the
-/// other's channel open:
+/// the code delivers is itself a defect. What the guards deliver is the DECLINE
+/// — never the inverse blanket restriction — on the SINGLE-RETURN
+/// `parse_static_line` path. Whether the LINE then ends up honestly unsupported
+/// is a SEPARATE question that depends on what else is dispatched around the
+/// declining arm, and residual 2 below is a measured shape where it does NOT.
+/// The decline is delivered by a PAIR of guards — one per production on that path
+/// that consumes a bare `can't block` as its own predicate and lowers it to one
+/// definition. Either guard alone leaves the other's channel open:
 ///
-///  1. `evasion::parse_subject_combat_rule_static` applies this marker
-///     POSITIONALLY, at the offset its own predicate matched, and declines before
-///     attempting the object. It is dispatched FIRST, and its trailing-`unless`
-///     fallback would otherwise accept a failed object parse and attach the rider
-///     to the inverse blanket restriction (#7454 round 2).
+///  1. `evasion::parse_subject_combat_rule_static` (`dispatch.rs:2261`) applies
+///     this marker POSITIONALLY, at the offset its own predicate matched, and
+///     declines before attempting the object. It is dispatched FIRST, and its
+///     trailing-`unless` fallback would otherwise accept a failed object parse and
+///     attach the rider to the inverse blanket restriction (#7454 round 2). The
+///     positional application is also what lets a sibling `can't attack` sentence
+///     that merely CONTAINS the marker keep the lowering that production gives it
+///     — see that function's comment for the mechanism.
 ///  2. The terminal blanket `can't block` arm in `dispatch.rs` scans the line for
-///     this marker. A line-wide scan is safe THERE and only there: that arm runs
-///     after every production that legitimately owns a line merely CONTAINING the
-///     phrase in another clause (a quoted granted ability, a sibling sentence),
-///     so it cannot pre-empt them. Hoisting a line-wide scan ahead of the
-///     combat-rule family instead was measured to do exactly that.
+///     this marker. A line-wide scan is tolerable THERE and only there, but the
+///     reason is narrower than "it runs after everything that could own such a
+///     line": it can only pre-empt an owner dispatched LATER than itself. The two
+///     owners of a line that merely CONTAINS the phrase in another clause are both
+///     dispatched EARLIER and so are already decided by the time this arm runs — a
+///     quoted granted ability (`anthem::parse_subject_continuous_static`,
+///     `dispatch.rs:1818`, via `parse_quoted_rule_static_modifications`) and a
+///     sibling `can't attack` sentence (guard 1's production, `dispatch.rs:2261`).
+///     A LATER-dispatched owner is NOT protected — residual 1. Hoisting a
+///     line-wide scan ahead of the combat-rule family instead was measured to
+///     break the sibling sentence, which is why guard 1 stays positional.
 ///
-/// It is NOT a whole-parser invariant, and specifically not a multi-static-path
-/// one. The compound activation-prohibition arm in `parse_static_line_multi_dispatch`
-/// ("<subject> … , and [its] activated abilities can't be activated") still
-/// derives a bare `CantBlock` for the combat half — from `parse_restriction_modes`
-/// for an attached subject, and from its own `scan_contains("can't block")`
-/// fallback otherwise — so a marker line carrying that tail still yields the
-/// inverse restriction there. Measured: over 825 generated
-/// subject × object × rider shapes, `parse_static_line` returns a blanket
-/// `CantBlock` for none, while `parse_static_line_multi` returns one for the 165
-/// that carry that activation tail. No printed card carries it (census: 8 cards
-/// print this phrase, none with any rider).
+/// The guarantee is NOT a whole-parser invariant. Three measured residuals, none
+/// reachable by a printed card (census of `AtomicCards.json`: 8 cards print this
+/// phrase — Sneaky Homunculus bare plus 7 quoted Spirit-token grants — none with
+/// any rider, any activation tail, any leading gate, or the reversed order):
+///
+///  1. REVERSED SENTENCE ORDER, single path. Guard 2 pre-empts a later-dispatched
+///     owner: `"~ can't block or be blocked by Walls. ~ can't attack unless you
+///     control a Wall."` returns `None` from `parse_static_line`, because the
+///     terminal `can't block` arm precedes the terminal `can't attack` arm and its
+///     line-wide `return None` fires first (same result for a `"Beasts …"`
+///     subject). `parse_static_line_multi` still binds all three statics, so there
+///     is no card impact.
+///  2. LEADING `"As long as <condition>, "` GATE, both paths — and THIS PR'S GUARD
+///     2 IS WHAT ROUTES THE LINE THERE. The inverted-as-long-as rewrite
+///     (`dispatch.rs:864`-`925`) recurses on the canonical
+///     `"<effect> as long as <condition>"` form; guard 2 makes that recursion
+///     return `None`, so the line falls to the SAME block's empty-modification
+///     fallback (`dispatch.rs:948`-`965`) and yields ONE inert definition: mode
+///     `Continuous`, `modifications: []`, `affected: SelfRef`, only the gate as its
+///     condition. Before
+///     this PR the recursion reached the unguarded terminal arm and the line
+///     lowered to `CantBlock` + condition, so this is not a pre-existing gap we
+///     merely left alone: we turned an INVERTED output into an INERT one. Less
+///     wrong — it no longer invents a restriction the card lacks, and no longer
+///     vacuously anchors `CantBlock` — but NOT honestly unsupported either: every
+///     printed semantic is dropped, and a static with no modifications is
+///     indistinguishable from a supported line to any consumer that counts
+///     statics. Measured over 20 leading-gate shapes (two parseable objects, one
+///     unparseable, one absent, each crossed with five riders), including the
+///     WELL-FORMED `"As long as you control a Wall, ~ can't block or be blocked by
+///     non-Spirit creatures."` whose bare form yields the correct 2 statics on the
+///     multi path. Scoped to the subjects
+///     `parse_effect_subject_prefix` admits (`~`, `creatures you control`, …): a
+///     `"Beasts …"` subject fails `split_on_effect_subject_comma` and declines at
+///     0 statics, which IS honest. The fix — decline in that fallback when the
+///     split effect clause carries this marker — is deliberately NOT taken here:
+///     38 distinct printed lines in generated card data already carry that
+///     fallback's exact output shape (`Continuous`, no modifications, `SelfRef`, a
+///     condition), so changing it needs its own plan and its own review. Pinned at
+///     the measured behaviour by
+///     `leading_as_long_as_gate_pins_known_inadequate_lowering` in `tests.rs`.
+///  3. ACTIVATION TAIL, multi path. The compound activation-prohibition arm in
+///     `parse_static_line_multi_dispatch` ("<subject> … , and [its] activated
+///     abilities can't be activated") still derives a bare `CantBlock` for the
+///     combat half — from `parse_activation_compound_restriction_modes`, which
+///     resolves an attached subject's own predicate and otherwise delegates to
+///     `parse_restriction_modes`, and from the arm's own
+///     `scan_contains("can't block")` fallback when there is no attached subject —
+///     so a marker line carrying that tail still yields the inverse restriction
+///     there. Measured: over 825 generated subject × object × rider shapes,
+///     `parse_static_line` returns a blanket `CantBlock` for none, while
+///     `parse_static_line_multi` returns one for the 165 that carry that tail.
 ///
 /// The marker deliberately stops BEFORE the separating space, and the space
 /// lives in the predicate instead. That is load-bearing, not cosmetic: with the

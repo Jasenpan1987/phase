@@ -2414,13 +2414,32 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     //
     // The shared marker is applied POSITIONALLY — at the offset where THIS
     // production's own predicate matched, `subject_lower` being the text before
-    // it — never scanned across the whole line. That distinction is load-bearing:
-    // a line that merely CONTAINS the phrase in a different clause (a quoted
-    // granted ability, "Spirits you control have \"This creature can't block or be
-    // blocked by non-Spirit creatures.\"", or a sibling sentence) is owned by an
-    // earlier arm that lowers it correctly, and a line-wide gate would pre-empt
-    // it. Sibling guard: the terminal blanket `can't block` arm in `dispatch.rs`,
-    // which is inside that arm and so may safely scan.
+    // it — never scanned across the whole line. That distinction is load-bearing,
+    // and the two kinds of line that merely CONTAIN the phrase in a different
+    // clause are protected by DIFFERENT mechanisms:
+    //
+    //  * a quoted granted ability ("Spirits you control have \"This creature
+    //    can't block or be blocked by non-Spirit creatures.\"") is owned by
+    //    `anthem::parse_subject_continuous_static`, dispatched at
+    //    `dispatch.rs:1818` — well before this production at `dispatch.rs:2261` —
+    //    so it has already returned and nothing at THIS seam can reach it. Only a
+    //    line-wide gate hoisted to the TOP of `parse_static_line_inner` would
+    //    endanger it.
+    //  * a sibling `can't attack` sentence is owned by THIS VERY PRODUCTION, not
+    //    by some other arm: "Beasts can't attack unless you control a Wall. Beasts
+    //    can't block or be blocked by Walls." lowers HERE to mode `CantAttack` with
+    //    `affected: Typed(Beast)` plus the rider (measured) — a subject scope the
+    //    SelfRef-only terminal `can't attack` arm cannot produce. It
+    //    survives because `scan_preceded` matches this function's predicate at the
+    //    FIRST word boundary that parses, the `can't attack` offset, and the marker
+    //    check at THAT offset does not match. A line-wide gate here would decline
+    //    the line and destroy this production's own correct output; that, measured,
+    //    is why the check is positional.
+    //
+    // Sibling guard: the terminal blanket `can't block` arm in `dispatch.rs`,
+    // which is inside that arm and so may scan the line — with the one residual
+    // its line-wide scan implies (reversed sentence order, no card impact)
+    // recorded on `parse_cant_block_or_be_blocked_by_marker`'s doc comment.
     if super::shared::parse_cant_block_or_be_blocked_by_marker(&lower[subject_lower.len()..])
         .is_ok()
     {

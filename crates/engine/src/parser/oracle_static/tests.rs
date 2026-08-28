@@ -33764,18 +33764,23 @@ fn symmetric_block_conjunction_declines_every_trailing_rider() {
 
 /// CR 509.1b (#7454, round 2): the rider decline is POSITIONAL — it fires only
 /// where the guarded production's OWN `can't block` predicate opens the
-/// conjunction. A line that merely CONTAINS the phrase in a DIFFERENT clause
-/// belongs to another production and must keep its exact lowering. Hoisting a
-/// line-wide marker scan ahead of the combat-rule family instead of guarding the
-/// seam was measured to break the second row below, which is why the guard is
+/// conjunction. A line that merely CONTAINS the phrase in a DIFFERENT clause must
+/// keep its exact lowering, and the OWNER differs per row: row 1 (the quoted
+/// grant) belongs to an arm dispatched earlier than the guarded seam, while row 2
+/// belongs to the guarded seam ITSELF, which matched a different predicate first.
+/// Hoisting a line-wide marker scan ahead of the combat-rule family instead of
+/// guarding the seam was measured to break row 2, which is why the guard is
 /// applied at the predicate offset rather than over the line.
 #[test]
 fn marker_in_another_clause_keeps_its_owning_production() {
     use crate::types::statics::StaticMode;
 
-    // A quoted granted ability: the OUTER line is a subject grant, and the inner
-    // static is correctly decomposed into BOTH directions as `AddStaticMode`
-    // modifications by the grant path — which runs before the combat-rule family.
+    // ROW 1 — a quoted granted ability: the OUTER line is a subject grant, and the
+    // inner static is correctly decomposed into BOTH directions as `AddStaticMode`
+    // modifications by `anthem::parse_subject_continuous_static` (`dispatch.rs:1818`),
+    // which runs well before the combat-rule family (`dispatch.rs:2261`). Only a
+    // line-wide gate hoisted to the TOP of `parse_static_line_inner` could
+    // endanger this row; a gate at the combat-rule seam never could.
     let granted = parse_static_line(
         "Spirits you control have \"This creature can't block or be blocked by non-Spirit creatures.\"",
     )
@@ -33800,7 +33805,12 @@ fn marker_in_another_clause_keeps_its_owning_production() {
         "the grant must carry one mode per direction, got: {granted_modes:?}"
     );
 
-    // A sibling sentence owned by a LATER dispatch arm than the guarded seam: the
+    // ROW 2 — a sibling sentence owned by the GUARDED SEAM ITSELF, not by another
+    // arm: `parse_subject_combat_rule_static` matches its own predicate at the
+    // FIRST word boundary that parses (the `can't attack` offset), and the marker
+    // check at THAT offset does not match, so the seam lowers this sentence and its
+    // rider. That is precisely why the check must be positional: a line-wide gate
+    // at the seam would decline the line and destroy the seam's own output. The
     // single-return path must still return THAT sentence's static, rider intact.
     let two_sentences =
         "~ can't attack unless you control a Wall. ~ can't block or be blocked by Walls.";
@@ -33822,6 +33832,114 @@ fn marker_in_another_clause_keeps_its_owning_production() {
         3,
         "both sentences must bind on the multi path: {:#?}",
         parse_static_line_multi(two_sentences),
+    );
+}
+
+/// CR 509.1b + CR 611.3a (#7454, round 2): a PIN, NOT A CLAIM OF CORRECTNESS.
+/// A leading `"As long as <condition>, "` gate in front of the symmetric
+/// conjunction lowers to ONE INERT `Continuous` static — zero modifications,
+/// `affected: SelfRef`, only the gate surviving — which is a KNOWN-INADEQUATE
+/// lowering: every printed semantic is dropped, and a static with no
+/// modifications is indistinguishable from a supported line to any consumer that
+/// counts statics. This test exists so that residual is PINNED at its MEASURED
+/// behaviour rather than only described in prose, and so the named follow-up
+/// (decline in the empty-modification fallback at `dispatch.rs:948`-`965` when the
+/// split effect clause carries the shared marker) has to update this test
+/// DELIBERATELY. A green run here does NOT mean the leading-gate shape is handled.
+///
+/// Routing, measured: the inverted-as-long-as rewrite (`dispatch.rs:864`-`925`)
+/// recurses on the canonical `"<effect> as long as <condition>"` form; the
+/// terminal `can't block` arm's marker guard — added by THIS PR — makes that
+/// recursion return `None`, so the line falls to the same block's
+/// empty-modification fallback. Before this PR the recursion reached the unguarded
+/// arm and the line lowered to `CantBlock` + condition, i.e. the INVERSION. So
+/// this PR replaced a wrong output with a different, less wrong output; it did not
+/// make this shape honest. Zero printed cards carry it (census of
+/// `AtomicCards.json`: the 8 cards printing this phrase are Sneaky Homunculus bare
+/// plus 7 quoted Spirit-token grants, none under a leading gate).
+#[test]
+fn leading_as_long_as_gate_pins_known_inadequate_lowering() {
+    use crate::types::statics::StaticMode;
+
+    // POSITIVE REACH-GUARD: without the leading gate, each subject below still
+    // binds the correct 2 halves on the multi path. The gate is the ONLY
+    // difference between that correct lowering and the inert one pinned after it.
+    for bare in [
+        "~ can't block or be blocked by non-Spirit creatures.",
+        "Creatures you control can't block or be blocked by non-Spirit creatures.",
+        "Beasts can't block or be blocked by Walls.",
+    ] {
+        let halves = parse_static_line_multi(bare);
+        assert_eq!(
+            halves.len(),
+            2,
+            "reach-guard: {bare} must still bind both halves: {halves:#?}"
+        );
+        assert!(
+            matches!(halves[0].mode, StaticMode::BlockRestriction { .. })
+                && matches!(halves[1].mode, StaticMode::CantBeBlockedBy { .. }),
+            "reach-guard: {bare} must bind one half per direction, got: {:?}",
+            halves.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+    }
+
+    // THE PIN. Both entry points yield one inert static. The subject filter is
+    // dropped too — `Creatures you control` collapses to `SelfRef` — which is part
+    // of what makes this lowering inadequate, not merely incomplete.
+    for gated in [
+        "As long as you control a Wall, ~ can't block or be blocked by non-Spirit creatures.",
+        "As long as you control a Wall, creatures you control can't block or be blocked by non-Spirit creatures.",
+    ] {
+        let single = parse_static_line(gated)
+            .expect("PIN: the leading gate currently yields a static instead of declining");
+        assert!(
+            matches!(single.mode, StaticMode::Continuous),
+            "PIN (known-inadequate lowering) for {gated}: got {:?}",
+            single.mode
+        );
+        assert!(
+            single.modifications.is_empty(),
+            "PIN (known-inadequate lowering) for {gated}: the printed restrictions are dropped entirely, so no modifications survive; got {:?}",
+            single.modifications
+        );
+        assert_eq!(
+            single.affected,
+            Some(TargetFilter::SelfRef),
+            "PIN (known-inadequate lowering) for {gated}: the subject scope is dropped too"
+        );
+        assert!(
+            matches!(single.condition, Some(StaticCondition::IsPresent { .. })),
+            "PIN: only the leading gate survives, got {:?}",
+            single.condition
+        );
+
+        let multi = parse_static_line_multi(gated);
+        assert_eq!(
+            multi.len(),
+            1,
+            "PIN (known-inadequate lowering) for {gated}: the gate suppresses both halves instead of binding them: {multi:#?}"
+        );
+        assert!(
+            matches!(multi[0].mode, StaticMode::Continuous) && multi[0].modifications.is_empty(),
+            "PIN (known-inadequate lowering) for {gated}: got {:?}",
+            multi[0].mode
+        );
+    }
+
+    // BOUNDARY, and this one IS honest: the channel only reaches subjects
+    // `parse_effect_subject_prefix` admits. A `Beasts` subject fails
+    // `split_on_effect_subject_comma`, so no rewrite happens, nothing lowers, and
+    // the line stays honestly unsupported at 0 statics on both paths.
+    let unsplittable = "As long as you control a Wall, Beasts can't block or be blocked by Walls.";
+    assert!(
+        parse_static_line(unsplittable).is_none(),
+        "the unsplittable subject must stay honestly unsupported, got: {:?}",
+        parse_static_line(unsplittable).map(|d| d.mode)
+    );
+    assert!(
+        parse_static_line_multi(unsplittable).is_empty(),
+        "the unsplittable subject must stay honestly unsupported, got: {:#?}",
+        parse_static_line_multi(unsplittable)
     );
 }
 
