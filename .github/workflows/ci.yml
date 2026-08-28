@@ -174,12 +174,31 @@ jobs:
         # test binaries and their runtime dependencies for the shard jobs.
         run: cargo nextest archive --profile ci --workspace --exclude phase-tauri --features engine/proptest --archive-file nextest-archive.tar.zst
 
+      - name: Build binaries launched by integration tests
+        # `CARGO_BIN_EXE_*` embeds target/debug paths. Nextest's archive does
+        # not preserve those launcher paths, so share the two binaries the
+        # integration tests execute directly with every shard.
+        run: |
+          cargo build -p probe-pin
+          cargo build -p phase-ai --bin ai-commander
+
       - name: Upload test archive
         uses: actions/upload-artifact@v4
         with:
           name: nextest-archive
           path: nextest-archive.tar.zst
           compression-level: 0
+          retention-days: 1
+
+      - name: Upload test runtime binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runtime-binaries
+          path: |
+            target/debug/probe-pin
+            target/debug/ai-commander
+          compression-level: 0
+          if-no-files-found: error
           retention-days: 1
 
   rust-test:
@@ -213,6 +232,12 @@ jobs:
 
       - name: Prepare test archive destination
         run: mkdir -p target
+
+      - name: Download test runtime binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-runtime-binaries
+          path: target/debug
 
       - name: Run tests
         # The archive retains build options. Each shard only extracts it and
