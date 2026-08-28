@@ -202,6 +202,17 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
+ *      replaced in serialized GameState payloads by the canonical
+ *      QuantityRef.PropertyAggregate tag with a validated source object. New
+ *      peers migrate both old input tags, but a v45 peer cannot deserialize
+ *      the canonical tag emitted by v46, so the full-game handshake refuses
+ *      that one-way parse mismatch. Lobby messages are unchanged.
+ * 45 — GameState gained serialized cast-occurrence provenance and prepared-copy links.
+ * 44 — Resolution-time optional PayCost(OneOf) branch choice added a
+ *      serialized WaitingFor/GameAction pair.
+ * 43 — Engine-owned stack-resolution automation retired the legacy native
+ *      Resolve All request/result wire messages.
  * 42 — FormatConfig.deck_size changed from a bare u16 to the adjacently
  *      tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
  *      CR 903.13f(1) makes Commander Draft a command-zone format with a
@@ -321,7 +332,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 43;
+export const PROTOCOL_VERSION = 46;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -25,8 +25,8 @@ use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
     LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
     PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp, WaitingFor,
-    ZoneChangeRecord,
+    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
+    ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -3363,7 +3363,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
@@ -3394,6 +3393,9 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_counts_population_matching(aggregate.source(), filter_pred)
         }
         // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,
         // resolution/turn counters, and cost bookkeeping.
@@ -3430,7 +3432,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
-        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
@@ -5765,7 +5766,6 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::TrackedSetSize
             | QuantityRef::FilteredTrackedSetSize { .. }
-            | QuantityRef::TrackedSetAggregate { .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::TrackedSet { .. },
             }
@@ -5773,6 +5773,15 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
                 source: CardTypeSetSource::TrackedSet { .. },
                 ..
             } => true,
+            QuantityRef::PropertyAggregate(aggregate) => {
+                let mut found = false;
+                let complete = aggregate
+                    .source()
+                    .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+                        found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. })
+                    });
+                found || !complete
+            }
             // CR 608.2c: a player-count whose filter is keyed on the chain's
             // tracked object set is a CONSUMER of that set — the preceding
             // producer must publish it, or the count resolves to 0. This is the
@@ -7206,6 +7215,42 @@ pub(crate) struct UpfrontOptionalGate {
     /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
     /// on it. That is not the same as "no preference stored": it is "no key exists".
     pub key: Option<MayTriggerAutoChoiceKey>,
+}
+
+/// CR 118.12 + CR 608.2d: enumerate the payable immediate branches of an
+/// optional root `PayCost(OneOf)` without renumbering them. The chooser is only
+/// an adapter; affordability and execution remain owned by `game::costs`.
+pub(crate) fn resolution_optional_payment_options(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(PlayerId, Vec<ResolutionOptionalPaymentOption>)> {
+    let Effect::PayCost {
+        cost: AbilityCost::OneOf { costs },
+        scale: None,
+        payer,
+    } = &ability.effect
+    else {
+        return None;
+    };
+    let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer)?;
+    let scope = crate::game::costs::PaymentScope::Resolution {
+        ability,
+        cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+    };
+    let options = costs
+        .iter()
+        .enumerate()
+        .filter(|(_, cost)| {
+            crate::game::costs::is_direct_resolution_optional_payment_branch(cost)
+                && crate::game::costs::supported_at_resolution(cost)
+                && crate::game::costs::can_pay(state, payer, ability.source_id, cost, &scope)
+        })
+        .map(|(index, cost)| ResolutionOptionalPaymentOption {
+            index,
+            cost: cost.clone(),
+        })
+        .collect();
+    Some((payer, options))
 }
 
 pub(crate) fn upfront_optional_gate(
@@ -11269,6 +11314,10 @@ fn resolve_chain_body(
         ability,
         OptionalFeasibility::Known(optional_is_infeasible),
     ) {
+        let UpfrontOptionalGate {
+            prompt_player,
+            key: may_trigger_key,
+        } = gate;
         // The executable half of the `optional_for` coupling note above: this branch is
         // reachable only because the CR 101.4 fan-out already returned, so the authority's
         // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
@@ -11279,11 +11328,53 @@ fn resolve_chain_body(
             "CR 608.2d + CR 101.4: the fan-out early return must have taken every \
              `optional_for` ability before the up-front gate"
         );
+        if let Some((payer, costs)) = resolution_optional_payment_options(state, ability) {
+            if may_trigger_key.as_ref().is_some_and(|key| {
+                matches!(
+                    state.may_trigger_auto_choice_for_live_prompt(key),
+                    Some(AutoMayChoice::Decline)
+                )
+            }) {
+                resolve_optional_effect_decision(
+                    state,
+                    ability.clone(),
+                    AutoMayChoice::Decline,
+                    events,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+            if costs.is_empty() {
+                // CR 608.2d: an impossible optional payment is declined without
+                // opening a choice window.
+                resolve_optional_effect_decision(
+                    state,
+                    ability.clone(),
+                    AutoMayChoice::Decline,
+                    events,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+            state
+                .install_direct_choice_frame(
+                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                        ability: Box::new(ability_with_event_context_targets(state, ability)),
+                        trigger_event: state.current_trigger_event.clone(),
+                        trigger_events: state.current_trigger_events.clone(),
+                        trigger_match_count: state.current_trigger_match_count,
+                    }),
+                    WaitingFor::ResolutionOptionalPaymentChoice {
+                        player: payer,
+                        source_id: ability.source_id,
+                        costs,
+                    },
+                )
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+            return Ok(());
+        }
+
         let description = ability.description.clone();
-        let UpfrontOptionalGate {
-            prompt_player,
-            key: may_trigger_key,
-        } = gate;
         // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
         // not a duplicated authority: the KEY is what has to be built in one place, and it
         // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
@@ -16274,11 +16365,17 @@ mod tests {
     #[test]
     fn token_power_toughness_tracked_set_marks_ability_as_referencing_tracked_set() {
         let tracked_pt = PtValue::Quantity(QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetAggregate {
-                function: crate::types::ability::AggregateFunction::Sum,
-                property: crate::types::ability::ObjectProperty::Power,
-                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            },
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    crate::types::ability::AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::Power,
+                    crate::types::ability::CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
         });
         let ability = ResolvedAbility::new(
             Effect::Token {
@@ -26007,13 +26104,18 @@ mod tests {
 
         let condition = AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::Toughness,
-                    filter: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
-                },
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Toughness,
+                        crate::types::ability::CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
+                        },
+                    )
+                    .expect("statically valid property aggregate"),
+                ),
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 40 },
@@ -26638,36 +26740,46 @@ mod tests {
             Effect::Token {
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 toughness: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 types: vec!["Creature".to_string(), "Illusion".to_string()],
                 colors: vec![ManaColor::Blue],
@@ -26783,36 +26895,46 @@ mod tests {
             Effect::Token {
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 toughness: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 types: vec!["Creature".to_string(), "Illusion".to_string()],
                 colors: vec![ManaColor::Blue],
