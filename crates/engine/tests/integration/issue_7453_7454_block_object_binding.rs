@@ -436,3 +436,135 @@ fn issue_7453_evasion_abilities_are_cumulative() {
         "the FIRST evasion ability must still apply"
     );
 }
+
+/// A deliberately SYNTHETIC grammar probe — the one fixture in this file that is
+/// not verbatim printed text, and labelled as such. No printed card carries a
+/// leading `"As long as <condition>, "` gate on the symmetric conjunction (census
+/// of every face in `AtomicCards.json`), so there is no Oracle line to quote. What
+/// is under test is the BUILDING BLOCK — the gate composed with the conjunction —
+/// which is exactly the axis the parser now handles generically, and the runtime
+/// question it raises cannot be answered by a parse-shape assertion.
+const GATED_SYMMETRIC_CONJUNCTION: &str = "As long as you control a Wall, this creature can't block or be blocked by creatures with power 2 or greater.";
+
+/// Build the gated fixture with and without the permanent the gate names, so the
+/// two arms differ ONLY in whether the printed condition holds.
+///
+/// Returns `(runner, gated, big, small)`. Layers are flushed before the caller
+/// asserts, mirroring `issue_7453_counter_moves_the_live_power_threshold`: the
+/// subtype the gate keys on is a computed characteristic, so a fixture that reads
+/// it without a flush is asserting on pre-layer state.
+fn gated_symmetric_fixture(
+    controls_a_wall: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+) {
+    let mut s = GameScenario::new();
+    let gated = s
+        .add_creature_from_oracle(P0, "Gated Homunculus", 1, 1, GATED_SYMMETRIC_CONJUNCTION)
+        .id();
+    if controls_a_wall {
+        // CR 604.1: "you control a Wall" is relative to the STATIC's controller,
+        // so the Wall belongs to P0, not to the creatures under restriction.
+        s.add_creature(P0, "Test Wall", 0, 4)
+            .with_subtypes(vec!["Wall"]);
+    }
+    let big = s.add_vanilla(P1, 3, 3);
+    let small = s.add_vanilla(P1, 1, 1);
+    let mut runner = s.build();
+    layers::mark_layers_full(runner.state_mut());
+    layers::evaluate_layers(runner.state_mut());
+    (runner, gated, big, small)
+}
+
+/// CR 611.3a + CR 509.1b (#7454, round 4): a leading `"As long as <condition>, "`
+/// gate must GATE BOTH halves at runtime, not merely be recorded on the parsed
+/// statics. CR 611.3a makes clause orientation semantically irrelevant, so the
+/// gated line's enforcement must equal the bare line's enforcement whenever the
+/// condition holds, and must vanish entirely when it does not.
+///
+/// The two arms differ ONLY in whether P0 controls a Wall, which makes each arm
+/// the other's control:
+///
+///  * gate FALSE — both directions must be fully open. This is the arm that fails
+///    if the condition is dropped on either half, or typed as
+///    `StaticCondition::Unrecognized` (which evaluates to `true`, so both
+///    restrictions would apply unconditionally).
+///  * gate TRUE — both directions must bite exactly as the ungated form does,
+///    and still as a FILTER: the power-1 creature stays legal in both directions,
+///    so a regression to a blanket prohibition fails here rather than passing.
+///
+/// Revert-failing against the state this PR was opened in: the gated line then
+/// lowered to ONE inert `Continuous` static with no modifications, so the
+/// `gate TRUE` arm's two `!can_block_pair` assertions were both `true` — the card
+/// enforced nothing while reading as parsed.
+#[test]
+fn issue_7454_leading_gate_toggles_both_directions_at_runtime() {
+    // --- Reach-guard: the gated line parses to the same two directed statics as
+    // the bare form, each carrying the gate. Without this the arms below could
+    // agree for the wrong reason (e.g. nothing parsed at all).
+    let (runner, gated, _, _) = gated_symmetric_fixture(true);
+    assert_symmetric_pair(runner.state(), gated, "gated symmetric conjunction");
+    let defs = &runner
+        .state()
+        .objects
+        .get(&gated)
+        .expect("the gated creature must exist")
+        .static_definitions;
+    for def in defs.iter_unchecked() {
+        assert!(
+            def.condition.is_some(),
+            "each half must carry the gate independently (CR 509.1b: the two \
+             restrictions are cumulative, so each is gated on its own): {:?}",
+            def.mode
+        );
+    }
+
+    // --- Gate FALSE: no Wall, so neither printed restriction applies.
+    let (runner, gated, big, _small) = gated_symmetric_fixture(false);
+    let state = runner.state();
+    assert!(
+        can_block_pair(state, big, gated),
+        "gate false: the evasion half must not apply — a power-3 creature blocks freely"
+    );
+    assert!(
+        can_block_pair(state, gated, big),
+        "gate false: the blocker half must not apply — the creature may block a 3/3"
+    );
+
+    // --- Gate TRUE: P0 controls a Wall, so both halves bite.
+    let (runner, gated, big, small) = gated_symmetric_fixture(true);
+    let state = runner.state();
+    assert!(
+        !can_block_pair(state, big, gated),
+        "gate true: the evasion half must apply (measured true before this round — \
+         the line lowered to an inert static and enforced nothing)"
+    );
+    assert!(
+        !can_block_pair(state, gated, big),
+        "gate true: the blocker half must apply (measured true before this round)"
+    );
+    // Still a FILTER, not a blanket — in BOTH directions.
+    assert!(
+        can_block_pair(state, small, gated),
+        "gate true: a power-1 creature must still block it — the evasion half is a filter"
+    );
+    assert!(
+        can_block_pair(state, gated, small),
+        "gate true: it must still block a 1/1 — the blocker half is a filter, and a \
+         regression to the blanket `CantBlock` inversion fails here"
+    );
+
+    // CR 509.1: the declaration seam is separate from the per-pair predicate, so
+    // the gate must reach it too.
+    assert!(
+        validate_blockers(state, &[(big, gated)]).is_err(),
+        "gate true: a power-3 blocker is an illegal declaration"
+    );
+    assert!(
+        validate_blockers(state, &[(small, gated)]).is_ok(),
+        "gate true: a power-1 blocker is legal — the reach-guard for the above"
+    );
+}
