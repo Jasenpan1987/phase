@@ -1063,4 +1063,79 @@ describe("curated delta install", () => {
       }
     });
   });
+
+  it("settles the in-flight downloads before a failure leaves the selector", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+    const failed = await failures(backend);
+
+    // Park the SECOND image fetch, whatever it turns out to be, and starve
+    // every one after it: the first is served, the second waits at the gate,
+    // and the rest 503. That records a `failure`, which `schedule` re-throws
+    // on its next call — the unwind this test is about, with a task provably
+    // still running. Counting fetches rather than naming a card keeps the
+    // setup independent of the order descriptors happen to be visited in.
+    let seen = 0;
+    const release = holdImages(() => (seen += 1) === 2);
+    imagesServed = 0;
+    imageBudget = 1;
+    const started = await startCurated(backend);
+
+    // Reach guard: the membership must be big enough to have a third fetch to
+    // fail on, or nothing is ever in flight at the unwind and the assertion
+    // below would hold for the wrong reason.
+    expect(started.descriptors.length).toBeGreaterThanOrEqual(3);
+    await vi.waitFor(() => { expect(imageRequests().length).toBeGreaterThan(2); }, { timeout: 5000 });
+
+    // THE INVARIANT. A failure must not surface while a download is still in
+    // flight. `run()` terminates the record the moment it does, and a task
+    // that outlives that write goes on to `markComplete` anyway — adding an
+    // `objects` row at this root and incrementing `objectsPromoted` on an
+    // operation the worker has already finished with, past the
+    // `collectCuratedGarbage` that would have reclaimed it.
+    await new Promise((resolve) => { setTimeout(resolve, 250); });
+    expect(failed).toHaveLength(0);
+
+    // Releasing the parked task is what lets the failure through.
+    imageBudget = Number.POSITIVE_INFINITY;
+    release();
+    await vi.waitFor(() => { expect(failed).toHaveLength(1); }, { timeout: 5000 });
+  });
+
+  it("writes nothing more once cancel has returned", async () => {
+    const backend = await ScryfallBrowserVisualPackBackend.create();
+
+    // Park a download and wait until it is provably AT the gate, so a task is
+    // certainly past the guard and inside `fetchImage` when the cancel lands.
+    // `installObject` consults `signal` only there — its donor-reuse and
+    // cache-hit paths never do — so such a task reaches `markComplete`
+    // whatever the abort says. Waiting on a request COUNT instead would not
+    // pin this down: the batch reaches the gate at a variable point, and the
+    // assertion below then holds or fails on timing rather than on behaviour.
+    let seen = 0;
+    let parked = false;
+    const release = holdImages((source) => {
+      if (!source.startsWith("https://cards.scryfall.io/")) return false;
+      if ((seen += 1) !== 2) return false;
+      parked = true;
+      return true;
+    });
+    const started = await startCurated(backend);
+    await vi.waitFor(() => { expect(parked).toBe(true); }, { timeout: 5000 });
+
+    // Released on a timer rather than inline: `cancel()` now waits for the
+    // worker, so it cannot return until this fires, while a `cancel()` that
+    // did NOT wait returns first and reports a count the parked task then
+    // moves. That ordering is what the assertion reads.
+    const pending = backend.cancel(started.operation);
+    setTimeout(release, 150);
+    const status = await pending;
+    expect(status.state).toBe("cancelled");
+
+    // THE INVARIANT, asserted on the SNAPSHOT `cancel()` returns, because that
+    // is the value the panel publishes its terminal outcome from. Once it is
+    // handed over, nothing may still be promoting into the operation.
+    await new Promise((resolve) => { setTimeout(resolve, 400); });
+    const settledRecord = await backend.operationStatus(started.operation);
+    expect(settledRecord.objectsPromoted).toBe(status.objectsPromoted);
+  });
 });
