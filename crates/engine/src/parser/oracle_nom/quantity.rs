@@ -962,7 +962,12 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_scry_look_count_ref,
         parse_controlled_object_count_extremum,
         parse_the_number_of,
-        parse_object_property_aggregate_ref,
+        // The cast journal is an occurrence population, not a live-object type
+        // phrase, so it must win before the generic object aggregate arm.
+        alt((
+            parse_spell_history_property_aggregate_ref,
+            parse_object_property_aggregate_ref,
+        )),
         // Group mana-value aggregate parsers to reduce alt arity
         alt((
             parse_linked_exile_mana_value_ref,
@@ -1054,6 +1059,24 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // colors among ..." path; registering it here makes it reachable in the
         // bare-suffix context too.
         parse_distinct_colors_among_tail,
+        // CR 122.1: bare "different kind[s] of counters {on|among} <filter>" —
+        // reached after a parent has consumed "there are N [or more] " (Hundred-
+        // Battle Veteran: "as long as there are three or more different kinds of
+        // counters among creatures you control, ~ gets +2/+4"). CR 122.1 makes
+        // same-named counters interchangeable, which is the basis for
+        // de-duplicating counter *kinds* across the population before comparing
+        // against the threshold. Counter-side counterpart to
+        // `parse_distinct_colors_among_tail` immediately above: the tail
+        // combinator (`tag("different kind") + tag(" of counter") + "on"/"among"
+        // + parse_type_phrase`) is shared with the "the number of different kinds
+        // of counters among ..." path (`parse_number_of_inner`, used by Perrie,
+        // the Pulverizer); registering it here makes it reachable in the
+        // bare-suffix context too, so `parse_there_are_conditions` can build a
+        // `StaticCondition::QuantityComparison` instead of falling back to
+        // `StaticCondition::Unrecognized` (which `game/layers.rs` evaluates as
+        // unconditionally true — CR 611.3a requires the continuous effect to be
+        // re-evaluated live against the actual counter census, not locked in).
+        parse_distinct_counter_kinds_among_tail,
         // CR 402.1: "the player with the {most|fewest} cards in hand" — the
         // cross-player hand-size extremum, the hand-zone peer of the life
         // extremum. Distinctive "the player with the " prefix; no ordering
@@ -1643,6 +1666,65 @@ fn parse_object_property_aggregate_head(
         ),
     ))
     .parse(input)
+}
+
+/// CR 202.3 + CR 601.2i: Parse a mana-value reduction over the controller's
+/// per-turn spell-cast journal.
+///
+/// The aggregate head, current-cast exclusion, spell qualifier, and journal
+/// owner are independent grammar axes. Keeping them composed here avoids
+/// teaching the generic object-population parser that a past cast is a live
+/// battlefield object. `OtherThanTriggerObject` is the typed marker consumed
+/// by the cast-occurrence-aware journal evaluator; it does not compare names or
+/// storage object ids.
+fn parse_spell_history_property_aggregate_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
+    if property != ObjectProperty::ManaValue {
+        return Err(oracle_err(input));
+    }
+    let (rest, excludes_current) =
+        map(opt(tag("other ")), |prefix| prefix.is_some()).parse(rest)?;
+    // This card-family grammar uses the printed perfect-tense form. The
+    // shared journal parser intentionally accepts broader wording for older
+    // cards, so constrain this entry point before delegating to it.
+    peek(alt((
+        tag::<_, _, OracleError<'_>>("spells you've cast this turn"),
+        tag("instant and sorcery spells you've cast this turn"),
+    )))
+    .parse(rest)?;
+    let (rest, source) = parse_turn_journal_source(rest)?;
+    let source = match (source, excludes_current) {
+        (
+            CardTypeSetSource::TurnJournal {
+                journal,
+                scope,
+                filter,
+            },
+            true,
+        ) => {
+            let marker = TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::OtherThanTriggerObject]),
+            );
+            CardTypeSetSource::TurnJournal {
+                journal,
+                scope,
+                filter: Some(match filter {
+                    Some(filter) => TargetFilter::And {
+                        filters: vec![filter, marker],
+                    },
+                    None => marker,
+                }),
+            }
+        }
+        (source, _) => source,
+    };
+    Ok((
+        rest,
+        QuantityRef::PropertyAggregate(
+            PropertyAggregate::new(function, property, source)
+                .expect("spell journals support mana-value aggregates"),
+        ),
+    ))
 }
 
 /// Parse an object-property aggregate whose exact surface referent is bare
@@ -2573,6 +2655,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -2707,6 +2790,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -4076,9 +4160,11 @@ pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse event-context quantity references.
 ///
-/// "That {noun}" in a triggered ability refers to the object or value from
-/// the triggering event. The source-object variants resolve via
-/// `extract_source_from_event` → live object or LKI cache.
+/// Two referent kinds under two different rules. CR 608.2h governs the VALUE forms
+/// ("that much", "the damage dealt"): information from the game is determined once, when the
+/// effect applies. CR 608.2k governs the OBJECT forms ("that creature's power"): a specific
+/// untargeted object previously referred to by the trigger condition. The source-object
+/// variants resolve via `extract_source_from_event` → live object or LKI cache.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         // CR 608.2h: bare demonstrative amount — delegate to the shared
@@ -6507,6 +6593,64 @@ mod tests {
                 right: Box::new(pt_stat_quantity(right, scope)),
             }
         );
+    }
+
+    #[test]
+    fn property_aggregate_spell_history_suffix_and_punctuation_are_exact() {
+        let call_forth = "the total mana value of other spells you've cast this turn";
+        let (rest, qty) = parse_quantity_ref(call_forth).expect("Call Forth quantity must parse");
+        assert_eq!(rest, "");
+        let QuantityRef::PropertyAggregate(aggregate) = qty else {
+            panic!("expected property aggregate");
+        };
+        assert_eq!(aggregate.function(), AggregateFunction::Sum);
+        assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+        assert!(matches!(
+            aggregate.source(),
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: Some(filter),
+            } if filter.contains_other_than_trigger_object()
+        ));
+
+        let rootha =
+            "the greatest mana value among instant and sorcery spells you've cast this turn";
+        let (rest, qty) = parse_quantity_ref(rootha).expect("Rootha quantity must parse");
+        assert_eq!(rest, "");
+        assert!(matches!(
+            qty,
+            QuantityRef::PropertyAggregate(ref aggregate)
+                if aggregate.function() == AggregateFunction::Max
+                    && aggregate.property() == ObjectProperty::ManaValue
+                    && matches!(
+                        aggregate.source(),
+                        CardTypeSetSource::TurnJournal {
+                            journal: TurnJournalKind::SpellsCast,
+                            scope: CountScope::Controller,
+                            filter: Some(filter),
+                        } if !filter.contains_other_than_trigger_object()
+                    )
+        ));
+
+        assert!(parse_quantity_ref_complete(&format!("{call_forth}.")).is_ok());
+        let comma_form = format!("{rootha},");
+        let (rest, comma_qty) =
+            parse_quantity_ref(&comma_form).expect("comma-delimited quantity must parse");
+        assert_eq!(rest, ",");
+        assert!(matches!(comma_qty, QuantityRef::PropertyAggregate(_)));
+
+        for near_miss in [
+            "the total mana value of other spells you cast this turn",
+            "the total mana value of other spells you've cast this game",
+            "the greatest mana value among creature spells you've cast this turn",
+            "the total mana value of other spells you've cast this turn except copies",
+        ] {
+            assert!(
+                parse_quantity_ref_complete(near_miss).is_err(),
+                "near-miss or semantic tail must remain unsupported: {near_miss}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -9985,7 +10129,7 @@ mod tests {
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
 
-        // CR 603.7c: bare "the damage dealt" form maps to EventContextAmount.
+        // CR 608.2h: bare "the damage dealt" form maps to EventContextAmount.
         let (rest, q) = parse_quantity_ref("the damage dealt").unwrap();
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
