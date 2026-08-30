@@ -2050,10 +2050,27 @@ pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetF
 ///     line-wide scan ahead of the combat-rule family instead was measured to
 ///     break the sibling sentence, which is why guard 1 stays positional.
 ///
-/// The guarantee is NOT a whole-parser invariant. Three measured residuals, none
-/// reachable by a printed card (census of `AtomicCards.json`: 8 cards print this
-/// phrase — Sneaky Homunculus bare plus 7 quoted Spirit-token grants — none with
-/// any rider, any activation tail, any leading gate, or the reversed order):
+/// The LEADING `"As long as <condition>, "` GATE is handled, not residual:
+/// [`parse_gated_symmetric_block_conjunction_static`] strips the gate, delegates
+/// the restriction lowering to the bare arm, and attaches the typed condition to
+/// both halves, so the multi path binds the same two definitions the bare form
+/// does plus the gate. The single-return path declines in the
+/// empty-modification fallback when the SPLIT EFFECT CLAUSE carries this marker
+/// (`dispatch.rs`, inside the inverted-as-long-as block) — scoped to the effect
+/// clause, so the other printed lines that legitimately reach that fallback keep
+/// their exact prior lowering. It fails closed when the gate is untypeable
+/// (`StaticCondition::Unrecognized` evaluates to `true`, which would apply both
+/// restrictions unconditionally) and when the subject is outside
+/// `parse_effect_subject_prefix`'s set (a `"Beasts …"` subject fails
+/// `split_on_effect_subject_comma`); both cases leave the line honestly
+/// unsupported at 0 statics. Covered by
+/// `leading_as_long_as_gate_binds_both_halves_with_the_condition` in `tests.rs`.
+///
+/// The guarantee is NOT a whole-parser invariant. Two measured residuals remain,
+/// neither reachable by a printed card (census of `AtomicCards.json`: 8 cards
+/// print this phrase — Sneaky Homunculus bare plus 7 quoted Spirit-token grants —
+/// none with any rider, any activation tail, any leading gate, or the reversed
+/// order), and both predate this production's base:
 ///
 ///  1. REVERSED SENTENCE ORDER, single path. Guard 2 pre-empts a later-dispatched
 ///     owner: `"~ can't block or be blocked by Walls. ~ can't attack unless you
@@ -2062,36 +2079,7 @@ pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetF
 ///     line-wide `return None` fires first (same result for a `"Beasts …"`
 ///     subject). `parse_static_line_multi` still binds all three statics, so there
 ///     is no card impact.
-///  2. LEADING `"As long as <condition>, "` GATE, both paths — and THIS PR'S GUARD
-///     2 IS WHAT ROUTES THE LINE THERE. The inverted-as-long-as rewrite
-///     (`dispatch.rs:864`-`925`) recurses on the canonical
-///     `"<effect> as long as <condition>"` form; guard 2 makes that recursion
-///     return `None`, so the line falls to the SAME block's empty-modification
-///     fallback (`dispatch.rs:948`-`965`) and yields ONE inert definition: mode
-///     `Continuous`, `modifications: []`, `affected: SelfRef`, only the gate as its
-///     condition. Before
-///     this PR the recursion reached the unguarded terminal arm and the line
-///     lowered to `CantBlock` + condition, so this is not a pre-existing gap we
-///     merely left alone: we turned an INVERTED output into an INERT one. Less
-///     wrong — it no longer invents a restriction the card lacks, and no longer
-///     vacuously anchors `CantBlock` — but NOT honestly unsupported either: every
-///     printed semantic is dropped, and a static with no modifications is
-///     indistinguishable from a supported line to any consumer that counts
-///     statics. Measured over 20 leading-gate shapes (two parseable objects, one
-///     unparseable, one absent, each crossed with five riders), including the
-///     WELL-FORMED `"As long as you control a Wall, ~ can't block or be blocked by
-///     non-Spirit creatures."` whose bare form yields the correct 2 statics on the
-///     multi path. Scoped to the subjects
-///     `parse_effect_subject_prefix` admits (`~`, `creatures you control`, …): a
-///     `"Beasts …"` subject fails `split_on_effect_subject_comma` and declines at
-///     0 statics, which IS honest. The fix — decline in that fallback when the
-///     split effect clause carries this marker — is deliberately NOT taken here:
-///     38 distinct printed lines in generated card data already carry that
-///     fallback's exact output shape (`Continuous`, no modifications, `SelfRef`, a
-///     condition), so changing it needs its own plan and its own review. Pinned at
-///     the measured behaviour by
-///     `leading_as_long_as_gate_pins_known_inadequate_lowering` in `tests.rs`.
-///  3. ACTIVATION TAIL, multi path. The compound activation-prohibition arm in
+///  2. ACTIVATION TAIL, multi path. The compound activation-prohibition arm in
 ///     `parse_static_line_multi_dispatch` ("<subject> … , and [its] activated
 ///     abilities can't be activated") still derives a bare `CantBlock` for the
 ///     combat half — from `parse_activation_compound_restriction_modes`, which
@@ -2113,8 +2101,20 @@ pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetF
 /// Two structural segments (prohibition verb, then conjunction + object head)
 /// rather than one flat literal, so a reversed-order or trailing-gate sibling
 /// factors onto an existing axis instead of adding a full-line `alt` arm.
+///
+/// The prohibition verb accepts BOTH the ASCII apostrophe (`can't`) and the
+/// U+2019 typographic one (`can’t`), per the paired-apostrophe convention the
+/// rest of the parser already follows (`oracle_trigger.rs`'s `wasn't`/`wasn’t`,
+/// `isn't`/`isn’t`, `it's`/`it’s` pairs). MTGJSON's `AtomicCards.json` prints the
+/// ASCII form today — measured: zero of the 35,798 exported entries carry `’`
+/// anywhere in `oracle_text` — so this is a typography guard, not a card unlock: it
+/// keeps a Scryfall-sourced or hand-authored line from silently bypassing this
+/// production AND the two decline guards keyed on this marker, which together
+/// are the only thing standing between that line and the blanket-`CantBlock`
+/// inversion. Only this segment is paired; `" or be blocked by"` has no
+/// apostrophe to vary.
 pub(crate) fn parse_cant_block_or_be_blocked_by_marker(input: &str) -> OracleResult<'_, ()> {
-    let (input, _) = tag("can't block").parse(input)?;
+    let (input, _) = alt((tag("can't block"), tag("can’t block"))).parse(input)?;
     let (input, _) = tag(" or be blocked by").parse(input)?;
     Ok((input, ()))
 }
@@ -2181,6 +2181,76 @@ fn parse_subject_cant_attack_you_or_block_static(
     Some(vec![attack, block])
 }
 
+/// CR 509.1b + CR 611.3a: the symmetric block conjunction in EITHER printed
+/// clause orientation — bare (`"<subject> can't block or be blocked by
+/// <object>."`) or under a leading gate (`"As long as <condition>, <subject>
+/// can't block or be blocked by <object>."`).
+///
+/// CR 611.3a makes the orientation of a condition clause semantically
+/// irrelevant, so this is one production with two entry shapes rather than two
+/// productions: the gated arm strips the gate, delegates the restriction lowering
+/// to the SAME bare arm, and attaches the typed condition to both halves. That
+/// keeps a single authority for "what does this clause lower to" and means any
+/// future object or subject the bare arm learns is immediately available gated.
+fn parse_symmetric_block_conjunction_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    parse_bare_symmetric_block_conjunction_static(text, lower)
+        .or_else(|| parse_gated_symmetric_block_conjunction_static(text, lower))
+}
+
+/// CR 611.3a + CR 509.1b: the LEADING-GATE orientation — `"As long as
+/// <condition>, <subject> can't block or be blocked by <object>."`
+///
+/// The shared inverted-gate splitter [`try_split_inverted_as_long_as`] isolates
+/// the effect clause, [`parse_bare_symmetric_block_conjunction_static`] lowers it
+/// into the same two direction-scoped definitions, and the typed condition is
+/// attached to BOTH. Per-half gating is what CR 509.1b's "Different evasion
+/// abilities are cumulative" requires, and it is enforced rather than merely
+/// recorded: both consumers evaluate `StaticDefinition::condition` per recipient
+/// before applying the restriction —
+/// `combat.rs::blocker_allowed_statics_for_from_precomputed` for the
+/// `BlockRestriction` half, `combat.rs::block_restriction_statics_against_from_precomputed`
+/// for the `CantBeBlockedBy` half.
+///
+/// Fails closed at two points, each because the alternative is a static that
+/// silently over-restricts or silently does nothing:
+///
+///  1. the condition must be TYPEABLE by [`parse_static_condition`].
+///     `StaticCondition::Unrecognized` evaluates to `true` on the very path both
+///     consumers above use (`layers.rs::evaluate_condition_with_context`, reached
+///     through `evaluate_condition_with_recipient`), so attaching one would apply
+///     BOTH restrictions unconditionally — inventing them on every board state the
+///     printed gate excludes. Declining leaves the line honestly unsupported
+///     instead.
+///  2. the splitter must find the effect-subject comma boundary. A subject
+///     outside [`parse_effect_subject_prefix`]'s set (e.g. a bare typed plural
+///     `"Beasts"`) yields no split, so nothing lowers here and the line stays
+///     honestly unsupported at zero statics on both entry points.
+///
+/// Only the LEADING orientation needs code. A TRAILING gate ("… can't block or be
+/// blocked by X as long as Y.") is already honestly unsupported: the bare arm
+/// fails closed on the unrecognized rider, and the single-return path's terminal
+/// `can't block` arm declines on the shared marker, so no wrong static is
+/// produced for it to begin with.
+fn parse_gated_symmetric_block_conjunction_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let split = try_split_inverted_as_long_as(&TextPair::new(text, lower))?;
+    let effect_lower = split.effect_text.to_lowercase();
+    let mut defs =
+        parse_bare_symmetric_block_conjunction_static(&split.effect_text, &effect_lower)?;
+    let condition = parse_static_condition(&split.condition_text)?;
+    for def in &mut defs {
+        def.condition = Some(condition.clone());
+        // The printed line, gate included, is what a consumer should show.
+        def.description = Some(text.to_string());
+    }
+    Some(defs)
+}
+
 /// CR 509.1b + CR 604.1 + CR 611.3a: "<subject> can't block or be blocked by
 /// <object>" — a CONJUNCTION of two restrictions that share one printed object,
 /// so it needs one `StaticDefinition` per direction:
@@ -2211,7 +2281,7 @@ fn parse_subject_cant_attack_you_or_block_static(
 /// restriction the card lacks (the subject could never block anything), DROPPING
 /// the one it has (the filtered creatures could block it freely), and, for a
 /// filtered subject, losing the subject scope as well.
-fn parse_symmetric_block_conjunction_static(
+fn parse_bare_symmetric_block_conjunction_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {

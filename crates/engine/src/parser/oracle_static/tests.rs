@@ -33917,10 +33917,16 @@ fn symmetric_block_conjunction_scopes_a_filtered_subject() {
 /// from the predicate: the `dispatch.rs` guard declines on the phrase alone, so
 /// an object this grammar cannot yet express fails CLOSED.
 ///
-/// The two cases reach two DIFFERENT production branches — the absent object
+/// The two bare cases reach two DIFFERENT production branches — the absent object
 /// fails at `space1` inside the predicate, the unparseable one at
 /// `parse_block_object_filter`'s unconsumed-input/`Any` rejection — which is why
 /// both are asserted.
+///
+/// The two GATED cases matter for the same reason at a different seam: a leading
+/// `"As long as <condition>, "` gate plus a bad object must decline as well, not
+/// fall through to the inverted-as-long-as empty-modification fallback and lower
+/// an inert `Continuous` static with no modifications, which would read as
+/// supported to any consumer that counts statics.
 #[test]
 fn symmetric_block_conjunction_declines_a_missing_or_unparseable_object() {
     for line in [
@@ -33928,6 +33934,9 @@ fn symmetric_block_conjunction_declines_a_missing_or_unparseable_object() {
         "~ can't block or be blocked by.",
         // An object the type-phrase grammar cannot express.
         "~ can't block or be blocked by wibble.",
+        // Same two, under a leading gate.
+        "As long as you control a Wall, ~ can't block or be blocked by.",
+        "As long as you control a Wall, ~ can't block or be blocked by wibble.",
     ] {
         assert!(
             parse_static_line(line).is_none(),
@@ -34127,101 +34136,120 @@ fn marker_in_another_clause_keeps_its_owning_production() {
     );
 }
 
-/// CR 509.1b + CR 611.3a (#7454, round 2): a PIN, NOT A CLAIM OF CORRECTNESS.
-/// A leading `"As long as <condition>, "` gate in front of the symmetric
-/// conjunction lowers to ONE INERT `Continuous` static — zero modifications,
-/// `affected: SelfRef`, only the gate surviving — which is a KNOWN-INADEQUATE
-/// lowering: every printed semantic is dropped, and a static with no
-/// modifications is indistinguishable from a supported line to any consumer that
-/// counts statics. This test exists so that residual is PINNED at its MEASURED
-/// behaviour rather than only described in prose, and so the named follow-up
-/// (decline in the empty-modification fallback at `dispatch.rs:948`-`965` when the
-/// split effect clause carries the shared marker) has to update this test
-/// DELIBERATELY. A green run here does NOT mean the leading-gate shape is handled.
+/// CR 509.1b + CR 611.3a (#7454, round 4): a leading `"As long as <condition>, "`
+/// gate in front of the symmetric conjunction binds BOTH direction-scoped halves
+/// with the typed condition attached to each. CR 611.3a makes clause orientation
+/// semantically irrelevant, so the gated lowering must be the bare lowering plus
+/// the gate — nothing dropped, nothing invented.
 ///
-/// Routing, measured: the inverted-as-long-as rewrite (`dispatch.rs:864`-`925`)
-/// recurses on the canonical `"<effect> as long as <condition>"` form; the
-/// terminal `can't block` arm's marker guard — added by THIS PR — makes that
-/// recursion return `None`, so the line falls to the same block's
-/// empty-modification fallback. Before this PR the recursion reached the unguarded
-/// arm and the line lowered to `CantBlock` + condition, i.e. the INVERSION. So
-/// this PR replaced a wrong output with a different, less wrong output; it did not
-/// make this shape honest. Zero printed cards carry it (census of
-/// `AtomicCards.json`: the 8 cards printing this phrase are Sneaky Homunculus bare
-/// plus 7 quoted Spirit-token grants, none under a leading gate).
+/// The assertion is deliberately RELATIVE: each gated half is compared field by
+/// field against the corresponding BARE half, so the test cannot drift into
+/// re-encoding whatever the parser happens to emit. Only `condition` (added) and
+/// `description` (the full printed line, gate included) may differ.
+///
+/// The single-return `parse_static_line` path DECLINES, because one
+/// `StaticDefinition` cannot carry two opposite-direction restrictions — the same
+/// division of labour the bare form already uses. Declining is what keeps the
+/// coverage report honest; the previous behaviour was an inert `Continuous` static
+/// with zero modifications and `affected: SelfRef`, which drops every printed
+/// semantic while remaining indistinguishable from a supported line to any
+/// consumer that counts statics.
 #[test]
-fn leading_as_long_as_gate_pins_known_inadequate_lowering() {
+fn leading_as_long_as_gate_binds_both_halves_with_the_condition() {
     use crate::types::statics::StaticMode;
 
-    // POSITIVE REACH-GUARD: without the leading gate, each subject below still
-    // binds the correct 2 halves on the multi path. The gate is the ONLY
-    // difference between that correct lowering and the inert one pinned after it.
-    for bare in [
-        "~ can't block or be blocked by non-Spirit creatures.",
-        "Creatures you control can't block or be blocked by non-Spirit creatures.",
-        "Beasts can't block or be blocked by Walls.",
+    for (bare, gated) in [
+        (
+            "~ can't block or be blocked by non-Spirit creatures.",
+            "As long as you control a Wall, ~ can't block or be blocked by non-Spirit creatures.",
+        ),
+        (
+            "Creatures you control can't block or be blocked by non-Spirit creatures.",
+            "As long as you control a Wall, creatures you control can't block or be blocked by non-Spirit creatures.",
+        ),
     ] {
-        let halves = parse_static_line_multi(bare);
+        // REACH-GUARD: the bare orientation still binds both halves unchanged.
+        let bare_halves = parse_static_line_multi(bare);
         assert_eq!(
-            halves.len(),
+            bare_halves.len(),
             2,
-            "reach-guard: {bare} must still bind both halves: {halves:#?}"
+            "reach-guard: {bare} must still bind both halves: {bare_halves:#?}"
         );
+
+        let gated_halves = parse_static_line_multi(gated);
+        assert_eq!(
+            gated_halves.len(),
+            2,
+            "the gate must bind both halves, not suppress them: {gated_halves:#?}"
+        );
+        // Printed clause order: blocker side first, evasion side second.
         assert!(
-            matches!(halves[0].mode, StaticMode::BlockRestriction { .. })
-                && matches!(halves[1].mode, StaticMode::CantBeBlockedBy { .. }),
-            "reach-guard: {bare} must bind one half per direction, got: {:?}",
-            halves.iter().map(|d| &d.mode).collect::<Vec<_>>()
+            matches!(gated_halves[0].mode, StaticMode::BlockRestriction { .. })
+                && matches!(gated_halves[1].mode, StaticMode::CantBeBlockedBy { .. }),
+            "one half per direction, in printed order, got: {:?}",
+            gated_halves.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+
+        for (gated_half, bare_half) in gated_halves.iter().zip(bare_halves.iter()) {
+            // The restriction itself — mode (object filter included) and the
+            // subject scope — must be IDENTICAL to the ungated lowering.
+            assert_eq!(
+                gated_half.mode, bare_half.mode,
+                "{gated}: the gate must not alter the restriction, only gate it"
+            );
+            assert_eq!(
+                gated_half.affected, bare_half.affected,
+                "{gated}: the subject scope must survive the gate"
+            );
+            // The bare form carries no condition; the gated form carries the typed
+            // gate on EVERY half (CR 509.1b: the two restrictions are independent,
+            // so each is gated on its own).
+            assert!(
+                bare_half.condition.is_none(),
+                "{bare}: the ungated form must stay unconditional, got {:?}",
+                bare_half.condition
+            );
+            assert!(
+                matches!(gated_half.condition, Some(StaticCondition::IsPresent { .. })),
+                "{gated}: the gate must be typed, never dropped and never `Unrecognized` (which evaluates to true and would apply the restriction unconditionally), got {:?}",
+                gated_half.condition
+            );
+            assert_eq!(
+                gated_half.description.as_deref(),
+                Some(gated),
+                "{gated}: the description must be the full printed line, gate included"
+            );
+        }
+
+        // The single-return path cannot represent two opposite-direction
+        // restrictions, so it declines instead of lowering an inert placeholder.
+        assert!(
+            parse_static_line(gated).is_none(),
+            "{gated}: the single-return path must decline, got {:?}",
+            parse_static_line(gated).map(|d| (d.mode, d.modifications))
         );
     }
 
-    // THE PIN. Both entry points yield one inert static. The subject filter is
-    // dropped too — `Creatures you control` collapses to `SelfRef` — which is part
-    // of what makes this lowering inadequate, not merely incomplete.
-    for gated in [
-        "As long as you control a Wall, ~ can't block or be blocked by non-Spirit creatures.",
-        "As long as you control a Wall, creatures you control can't block or be blocked by non-Spirit creatures.",
-    ] {
-        let single = parse_static_line(gated)
-            .expect("PIN: the leading gate currently yields a static instead of declining");
-        assert!(
-            matches!(single.mode, StaticMode::Continuous),
-            "PIN (known-inadequate lowering) for {gated}: got {:?}",
-            single.mode
-        );
-        assert!(
-            single.modifications.is_empty(),
-            "PIN (known-inadequate lowering) for {gated}: the printed restrictions are dropped entirely, so no modifications survive; got {:?}",
-            single.modifications
-        );
-        assert_eq!(
-            single.affected,
-            Some(TargetFilter::SelfRef),
-            "PIN (known-inadequate lowering) for {gated}: the subject scope is dropped too"
-        );
-        assert!(
-            matches!(single.condition, Some(StaticCondition::IsPresent { .. })),
-            "PIN: only the leading gate survives, got {:?}",
-            single.condition
-        );
+    // FAIL-CLOSED 1 — an UNTYPEABLE condition must decline on both paths rather
+    // than attach `StaticCondition::Unrecognized`, which evaluates to `true` at
+    // runtime and would therefore apply both restrictions unconditionally.
+    let untypeable = "As long as wibble wobble, ~ can't block or be blocked by Walls.";
+    assert!(
+        parse_static_line_multi(untypeable).is_empty(),
+        "an untypeable gate must leave the line honestly unsupported, got: {:#?}",
+        parse_static_line_multi(untypeable)
+    );
+    assert!(
+        parse_static_line(untypeable).is_none(),
+        "an untypeable gate must leave the line honestly unsupported, got: {:?}",
+        parse_static_line(untypeable).map(|d| d.mode)
+    );
 
-        let multi = parse_static_line_multi(gated);
-        assert_eq!(
-            multi.len(),
-            1,
-            "PIN (known-inadequate lowering) for {gated}: the gate suppresses both halves instead of binding them: {multi:#?}"
-        );
-        assert!(
-            matches!(multi[0].mode, StaticMode::Continuous) && multi[0].modifications.is_empty(),
-            "PIN (known-inadequate lowering) for {gated}: got {:?}",
-            multi[0].mode
-        );
-    }
-
-    // BOUNDARY, and this one IS honest: the channel only reaches subjects
-    // `parse_effect_subject_prefix` admits. A `Beasts` subject fails
-    // `split_on_effect_subject_comma`, so no rewrite happens, nothing lowers, and
-    // the line stays honestly unsupported at 0 statics on both paths.
+    // FAIL-CLOSED 2 — the gated channel only reaches subjects
+    // `parse_effect_subject_prefix` admits. A bare typed plural (`Beasts`) fails
+    // `split_on_effect_subject_comma`, so nothing lowers and the line stays
+    // honestly unsupported at 0 statics on both paths. The BARE orientation of the
+    // same subject is unaffected and still binds both halves.
     let unsplittable = "As long as you control a Wall, Beasts can't block or be blocked by Walls.";
     assert!(
         parse_static_line(unsplittable).is_none(),
@@ -34233,6 +34261,75 @@ fn leading_as_long_as_gate_pins_known_inadequate_lowering() {
         "the unsplittable subject must stay honestly unsupported, got: {:#?}",
         parse_static_line_multi(unsplittable)
     );
+    assert_eq!(
+        parse_static_line_multi("Beasts can't block or be blocked by Walls.").len(),
+        2,
+        "the bare orientation of the same subject must still bind both halves"
+    );
+}
+
+/// CR 509.1b (#7454, round 4): the symmetric conjunction's prohibition verb
+/// accepts the U+2019 typographic apostrophe (`can’t`) as well as the ASCII one,
+/// per the paired-apostrophe convention `oracle_trigger.rs` already follows for
+/// `wasn't`/`wasn’t` and `isn't`/`isn’t`.
+///
+/// MTGJSON prints the ASCII form today (zero exported cards carry `’` anywhere in
+/// `oracle_text`), so this is a typography guard, not a card unlock: the marker is
+/// what BOTH decline guards key on, so a curly-apostrophe line that missed it
+/// would slip past them toward the blanket-`CantBlock` inversion instead of being
+/// declined.
+///
+/// Asserted relative to the ASCII form — mode, subject scope and condition must
+/// match exactly; only `description` differs, since it echoes the printed text.
+#[test]
+fn symmetric_block_conjunction_accepts_the_typographic_apostrophe() {
+    for (ascii, curly) in [
+        (
+            "~ can't block or be blocked by non-Spirit creatures.",
+            "~ can’t block or be blocked by non-Spirit creatures.",
+        ),
+        (
+            "Creatures you control can't block or be blocked by creatures with power 2 or greater.",
+            "Creatures you control can’t block or be blocked by creatures with power 2 or greater.",
+        ),
+        (
+            "As long as you control a Wall, ~ can't block or be blocked by non-Spirit creatures.",
+            "As long as you control a Wall, ~ can’t block or be blocked by non-Spirit creatures.",
+        ),
+    ] {
+        let ascii_halves = parse_static_line_multi(ascii);
+        let curly_halves = parse_static_line_multi(curly);
+        assert_eq!(
+            ascii_halves.len(),
+            2,
+            "precondition: {ascii} must bind both halves: {ascii_halves:#?}"
+        );
+        assert_eq!(
+            curly_halves.len(),
+            2,
+            "{curly}: the typographic apostrophe must bind the same two halves: {curly_halves:#?}"
+        );
+        for (curly_half, ascii_half) in curly_halves.iter().zip(ascii_halves.iter()) {
+            assert_eq!(
+                curly_half.mode, ascii_half.mode,
+                "{curly}: apostrophe form must not alter the restriction"
+            );
+            assert_eq!(
+                curly_half.affected, ascii_half.affected,
+                "{curly}: apostrophe form must not alter the subject scope"
+            );
+            assert_eq!(
+                curly_half.condition, ascii_half.condition,
+                "{curly}: apostrophe form must not alter the gate"
+            );
+        }
+        // The single-return path declines both spellings, for the same reason.
+        assert!(
+            parse_static_line(curly).is_none(),
+            "{curly}: the single-return path must decline, got {:?}",
+            parse_static_line(curly).map(|d| d.mode)
+        );
+    }
 }
 
 /// CR 509.1b (#7454): the decline guard must not OVER-REACH. Every adjacent

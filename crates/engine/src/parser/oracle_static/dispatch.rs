@@ -945,6 +945,31 @@ pub(crate) fn parse_static_line_inner(
                     return Some(def);
                 }
             }
+            // CR 509.1b + CR 604.1 (#7454): the symmetric conjunction "<subject>
+            // can't block or be blocked by <object>" under a LEADING gate. ONE
+            // printed object serves TWO opposite-direction restrictions, which one
+            // `StaticDefinition` cannot carry, so the shape is owned by
+            // `parse_symmetric_block_conjunction_static` on the multi-static path
+            // (it binds one condition-gated definition per direction) and this
+            // single-return path must DECLINE. Reaching the generic fallback below
+            // instead produced mode `Continuous`, `modifications: []`, `affected:
+            // SelfRef` and only the gate — every printed semantic dropped, yet
+            // indistinguishable from a supported line to any consumer that counts
+            // statics, so a card in this class could allow illegal blocks while
+            // reading as parsed.
+            //
+            // Scoped to the SPLIT EFFECT CLAUSE via the shared marker, never to the
+            // whole line: the other printed lines that legitimately reach this
+            // fallback do not carry the marker in their effect clause, so their
+            // exact prior lowering is untouched.
+            if nom_primitives::scan_preceded(
+                &split.effect_text.to_lowercase(),
+                parse_cant_block_or_be_blocked_by_marker,
+            )
+            .is_some()
+            {
+                return None;
+            }
             // Rewrite succeeded (we cleanly separated condition from effect), but the
             // recursed parser could not model the effect clause. Produce a generic
             // Continuous static whose condition is typed via `parse_static_condition`
